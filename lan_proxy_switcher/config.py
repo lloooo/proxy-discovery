@@ -11,7 +11,7 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class Config:
-    ports: tuple[int, ...] = (7890, 1080)
+    ports: tuple[int, ...] = (7890, 1082)
     prefer_port: int = 7890
     scan_timeout_ms: int = 500
     scan_concurrency: int = 100

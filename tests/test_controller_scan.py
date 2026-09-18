@@ -55,7 +55,7 @@ def run_all(controller, *messages):
 
 
 HIT_7890 = ScanHit("172.20.10.1", 7890, 12.0)
-HIT_1080 = ScanHit("172.20.10.1", 1080, 15.0)
+HIT_1082 = ScanHit("172.20.10.1", 1082, 15.0)
 
 
 # ---------- 启动 ----------
@@ -114,7 +114,7 @@ def test_a_hit_is_applied_as_the_system_proxy(cfg, ui):
 def test_prefer_port_decides_which_hit_is_applied(cfg, ui):
     proxy = FakeProxy()
     controller, _ = build(
-        cfg, ui, proxy=proxy, discovery=DiscoveryResult((HIT_1080, HIT_7890), "subnet", "命中 2 个")
+        cfg, ui, proxy=proxy, discovery=DiscoveryResult((HIT_1082, HIT_7890), "subnet", "命中 2 个")
     )
 
     run_all(controller, Start())
@@ -132,13 +132,13 @@ def test_monitor_is_told_about_the_new_proxy(cfg, ui):
 
 def test_scan_results_reach_the_ui(cfg, ui):
     controller, _ = build(
-        cfg, ui, discovery=DiscoveryResult((HIT_7890, HIT_1080), "subnet", "命中 2 个")
+        cfg, ui, discovery=DiscoveryResult((HIT_7890, HIT_1082), "subnet", "命中 2 个")
     )
 
     run_all(controller, Start())
 
     results = [e for e in drain(ui) if isinstance(e, ScanResults)]
-    assert results[-1].hits == (HIT_7890, HIT_1080)
+    assert results[-1].hits == (HIT_7890, HIT_1082)
 
 
 def test_hits_are_streamed_while_scanning(cfg, ui):
@@ -252,9 +252,9 @@ def test_use_hit_applies_the_chosen_result(cfg, ui):
     proxy = FakeProxy()
     controller, _ = build(replace(cfg, auto_scan=False), ui, proxy=proxy)
 
-    run_all(controller, Start(), UseHitRequested(HIT_1080))
+    run_all(controller, Start(), UseHitRequested(HIT_1082))
 
-    assert proxy.applied == ["172.20.10.1:1080"]
+    assert proxy.applied == ["172.20.10.1:1082"]
     assert controller.state is State.PROXY_ACTIVE
 
 
@@ -265,9 +265,9 @@ def test_manual_pick_is_not_overwritten_by_an_in_flight_scan(cfg, ui):
         cfg, ui, proxy=proxy, discovery=DiscoveryResult((HIT_7890,), "gateway", "网关命中")
     )
 
-    run_all(controller, Start(), UseHitRequested(HIT_1080))
+    run_all(controller, Start(), UseHitRequested(HIT_1082))
 
-    assert proxy.applied == ["172.20.10.1:1080"]
+    assert proxy.applied == ["172.20.10.1:1082"]
     assert controller.state is State.PROXY_ACTIVE
 
 

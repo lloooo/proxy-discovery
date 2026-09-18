@@ -7,7 +7,7 @@ def test_missing_file_writes_defaults(tmp_path):
     path = tmp_path / "config.json"
     cfg = config.load(path)
 
-    assert cfg.ports == (7890, 1080)
+    assert cfg.ports == (7890, 1082)
     assert cfg.prefer_port == 7890
     assert cfg.scan_timeout_ms == 500
     assert cfg.scan_concurrency == 100
@@ -20,7 +20,7 @@ def test_missing_file_writes_defaults(tmp_path):
 
     written = json.loads(path.read_text(encoding="utf-8"))
     assert written["preferPort"] == 7890
-    assert written["ports"] == [7890, 1080]
+    assert written["ports"] == [7890, 1082]
     assert written["restoreProxyOnExit"] is False
 
 
@@ -60,13 +60,13 @@ def test_unparsable_file_uses_all_defaults(tmp_path):
 
 def test_prefer_port_outside_ports_falls_back_to_first(tmp_path):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"ports": [1080], "preferPort": 7890}), encoding="utf-8")
+    path.write_text(json.dumps({"ports": [1082], "preferPort": 7890}), encoding="utf-8")
     lines = []
 
     cfg = config.load(path, lines.append)
 
-    assert cfg.ports == (1080,)
-    assert cfg.prefer_port == 1080
+    assert cfg.ports == (1082,)
+    assert cfg.prefer_port == 1082
     assert any("preferPort" in line for line in lines)
 
 

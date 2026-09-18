@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 做出一个 Windows 桌面小工具 `LANProxySwitcher.exe`，能独占式切换物理网卡、用纯 TCP Connect 扫描局域网的 7890/1080 端口、自动写入当前用户的 Windows 系统代理，并持续监控、失效后自动重扫。
+**Goal:** 做出一个 Windows 桌面小工具 `LANProxySwitcher.exe`，能独占式切换物理网卡、用纯 TCP Connect 扫描局域网的 7890/1082 端口、自动写入当前用户的 Windows 系统代理，并持续监控、失效后自动重扫。
 
 **Architecture:** 8 个模块分两层——`scanner.py` / `config.py` 是纯逻辑（无 Windows 依赖），`network.py` / `proxy.py` 是薄薄的 Windows 适配层（PowerShell 子进程 + winreg），`controller.py` 是唯一的状态机，串行消费一个 `inbox` 队列因而全程无锁，`gui.py` 只在 Tkinter 主线程里通过 `root.after` 泵 `ui_queue`。所有跨模块依赖走 `typing.Protocol`，测试用 Fake 注入。
 
@@ -21,7 +21,7 @@
 - **只扫描本机已启用网卡对应的私有网段**（`10/8`、`172.16/12`、`192.168/16`）。不扫描公网，不接受用户输入的任意网段。
 - **工作线程中不得出现任何 `tkinter` 调用**。GUI 控件只在 Tkinter 主线程的 `_pump` 里更新。
 - **worker 线程中任何异常都不得静默消失**，一律转成事件回投 `inbox` 并记日志。
-- 端口默认 `[7890, 1080]`，优先级 `7890 > 1080`，同端口比 TCP 建连耗时。
+- 端口默认 `[7890, 1082]`，优先级 `7890 > 1082`，同端口比 TCP 建连耗时。
 - 配置文件 JSON 键名用 camelCase（`preferPort`、`scanTimeout`…），Python 侧字段用 snake_case。
 - 所有面向用户的日志与 GUI 文案用中文。
 
@@ -197,7 +197,7 @@ def test_missing_file_writes_defaults(tmp_path):
     path = tmp_path / "config.json"
     cfg = config.load(path)
 
-    assert cfg.ports == (7890, 1080)
+    assert cfg.ports == (7890, 1082)
     assert cfg.prefer_port == 7890
     assert cfg.scan_timeout_ms == 500
     assert cfg.scan_concurrency == 100
@@ -210,7 +210,7 @@ def test_missing_file_writes_defaults(tmp_path):
 
     written = json.loads(path.read_text(encoding="utf-8"))
     assert written["preferPort"] == 7890
-    assert written["ports"] == [7890, 1080]
+    assert written["ports"] == [7890, 1082]
     assert written["restoreProxyOnExit"] is False
 
 
@@ -250,13 +250,13 @@ def test_unparsable_file_uses_all_defaults(tmp_path):
 
 def test_prefer_port_outside_ports_falls_back_to_first(tmp_path):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"ports": [1080], "preferPort": 7890}), encoding="utf-8")
+    path.write_text(json.dumps({"ports": [1082], "preferPort": 7890}), encoding="utf-8")
     lines = []
 
     cfg = config.load(path, lines.append)
 
-    assert cfg.ports == (1080,)
-    assert cfg.prefer_port == 1080
+    assert cfg.ports == (1082,)
+    assert cfg.prefer_port == 1082
     assert any("preferPort" in line for line in lines)
 
 
@@ -293,7 +293,7 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class Config:
-    ports: tuple[int, ...] = (7890, 1080)
+    ports: tuple[int, ...] = (7890, 1082)
     prefer_port: int = 7890
     scan_timeout_ms: int = 500
     scan_concurrency: int = 100
@@ -498,7 +498,7 @@ def test_accepts_private_addresses(ipv4, prefix):
 
 def test_iphone_28_uses_real_mask():
     """iPhone 共享网络实测是 /28，不能按 /24 扫。"""
-    targets = enumerate_targets("172.20.10.7", 28, (7890, 1080))
+    targets = enumerate_targets("172.20.10.7", 28, (7890, 1082))
 
     ips = sorted({ip for ip, _ in targets}, key=lambda s: int(s.rsplit(".", 1)[1]))
     assert ips == [f"172.20.10.{i}" for i in range(1, 15) if i != 7]
@@ -531,28 +531,28 @@ def test_prefix_32_yields_no_targets():
 
 
 def test_prefix_30_yields_only_the_peer():
-    targets = enumerate_targets("192.168.1.5", 30, (7890, 1080))
+    targets = enumerate_targets("192.168.1.5", 30, (7890, 1082))
 
-    assert targets == [("192.168.1.6", 7890), ("192.168.1.6", 1080)]
+    assert targets == [("192.168.1.6", 7890), ("192.168.1.6", 1082)]
 
 
 def test_ports_are_expanded_per_ip_in_order():
-    targets = enumerate_targets("192.168.1.5", 30, (7890, 1080))
+    targets = enumerate_targets("192.168.1.5", 30, (7890, 1082))
 
-    assert [port for _, port in targets] == [7890, 1080]
+    assert [port for _, port in targets] == [7890, 1082]
 
 
 # ---------- 网关快路径（规格第 7.3 节阶段一）----------
 
 def test_gateway_targets_expands_ports():
-    assert gateway_targets("172.20.10.1", (7890, 1080)) == [
+    assert gateway_targets("172.20.10.1", (7890, 1082)) == [
         ("172.20.10.1", 7890),
-        ("172.20.10.1", 1080),
+        ("172.20.10.1", 1082),
     ]
 
 
 def test_gateway_targets_empty_when_no_gateway():
-    assert gateway_targets(None, (7890, 1080)) == []
+    assert gateway_targets(None, (7890, 1082)) == []
 
 
 def test_gateway_targets_refuses_public_gateway():
@@ -563,25 +563,25 @@ def test_gateway_targets_refuses_public_gateway():
 # ---------- 选择策略（规格第 7.4 节）----------
 
 def test_prefer_port_wins_over_lower_latency_on_other_port():
-    hits = [ScanHit("10.0.0.30", 1080, 5.0), ScanHit("10.0.0.20", 7890, 35.0)]
+    hits = [ScanHit("10.0.0.30", 1082, 5.0), ScanHit("10.0.0.20", 7890, 35.0)]
 
-    assert select_best(hits, 7890, (7890, 1080)) == ScanHit("10.0.0.20", 7890, 35.0)
+    assert select_best(hits, 7890, (7890, 1082)) == ScanHit("10.0.0.20", 7890, 35.0)
 
 
 def test_lowest_latency_wins_within_the_same_port():
     hits = [ScanHit("10.0.0.30", 7890, 35.0), ScanHit("10.0.0.20", 7890, 10.0)]
 
-    assert select_best(hits, 7890, (7890, 1080)).ip == "10.0.0.20"
+    assert select_best(hits, 7890, (7890, 1082)).ip == "10.0.0.20"
 
 
 def test_falls_back_to_next_port_when_prefer_port_absent():
-    hits = [ScanHit("10.0.0.30", 1080, 15.0)]
+    hits = [ScanHit("10.0.0.30", 1082, 15.0)]
 
-    assert select_best(hits, 7890, (7890, 1080)).port == 1080
+    assert select_best(hits, 7890, (7890, 1082)).port == 1082
 
 
 def test_select_best_returns_none_for_no_hits():
-    assert select_best([], 7890, (7890, 1080)) is None
+    assert select_best([], 7890, (7890, 1082)) is None
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -665,7 +665,7 @@ def enumerate_targets(
 def select_best(
     hits: Sequence[ScanHit], prefer_port: int, ports: Sequence[int]
 ) -> ScanHit | None:
-    """7890 > 1080，同端口取 TCP 建连耗时最低者。"""
+    """7890 > 1082，同端口取 TCP 建连耗时最低者。"""
     order = [prefer_port] + [port for port in ports if port != prefer_port]
     for port in order:
         candidates = [hit for hit in hits if hit.port == port]
@@ -843,12 +843,12 @@ def test_gateway_hit_short_circuits_full_scan():
     hit = ScanHit("172.20.10.1", 7890, 12.0)
     scan_fn, calls = recording_scan_fn([[hit]])
 
-    result = discover(adapter, (7890, 1080), scan_fn, threading.Event())
+    result = discover(adapter, (7890, 1082), scan_fn, threading.Event())
 
     assert result.phase == "gateway"
     assert result.hits == (hit,)
     assert len(calls) == 1
-    assert calls[0] == [("172.20.10.1", 7890), ("172.20.10.1", 1080)]
+    assert calls[0] == [("172.20.10.1", 7890), ("172.20.10.1", 1082)]
 
 
 def test_falls_through_to_subnet_scan_when_gateway_is_silent():
@@ -1108,7 +1108,7 @@ Expected: 全部 PASS
 .venv/Scripts/python.exe -c "
 import threading, time
 from lan_proxy_switcher.scanner import enumerate_targets, scan
-targets = enumerate_targets('192.168.10.10', 24, (7890, 1080))
+targets = enumerate_targets('192.168.10.10', 24, (7890, 1082))
 start = time.perf_counter()
 report = scan(targets, 500, 100, threading.Event())
 print(len(targets), 'targets', round(time.perf_counter() - start, 2), 's', len(report.hits), 'hits')
@@ -2780,7 +2780,7 @@ def run_all(controller, *messages):
 
 
 HIT_7890 = ScanHit("172.20.10.1", 7890, 12.0)
-HIT_1080 = ScanHit("172.20.10.1", 1080, 15.0)
+HIT_1082 = ScanHit("172.20.10.1", 1082, 15.0)
 
 
 # ---------- 启动 ----------
@@ -2839,7 +2839,7 @@ def test_a_hit_is_applied_as_the_system_proxy(cfg, ui):
 def test_prefer_port_decides_which_hit_is_applied(cfg, ui):
     proxy = FakeProxy()
     controller, _ = build(
-        cfg, ui, proxy=proxy, discovery=DiscoveryResult((HIT_1080, HIT_7890), "subnet", "命中 2 个")
+        cfg, ui, proxy=proxy, discovery=DiscoveryResult((HIT_1082, HIT_7890), "subnet", "命中 2 个")
     )
 
     run_all(controller, Start())
@@ -2857,13 +2857,13 @@ def test_monitor_is_told_about_the_new_proxy(cfg, ui):
 
 def test_scan_results_reach_the_ui(cfg, ui):
     controller, _ = build(
-        cfg, ui, discovery=DiscoveryResult((HIT_7890, HIT_1080), "subnet", "命中 2 个")
+        cfg, ui, discovery=DiscoveryResult((HIT_7890, HIT_1082), "subnet", "命中 2 个")
     )
 
     run_all(controller, Start())
 
     results = [e for e in drain(ui) if isinstance(e, ScanResults)]
-    assert results[-1].hits == (HIT_7890, HIT_1080)
+    assert results[-1].hits == (HIT_7890, HIT_1082)
 
 
 def test_hits_are_streamed_while_scanning(cfg, ui):
@@ -2977,9 +2977,9 @@ def test_use_hit_applies_the_chosen_result(cfg, ui):
     proxy = FakeProxy()
     controller, _ = build(replace(cfg, auto_scan=False), ui, proxy=proxy)
 
-    run_all(controller, Start(), UseHitRequested(HIT_1080))
+    run_all(controller, Start(), UseHitRequested(HIT_1082))
 
-    assert proxy.applied == ["172.20.10.1:1080"]
+    assert proxy.applied == ["172.20.10.1:1082"]
     assert controller.state is State.PROXY_ACTIVE
 
 
@@ -3956,7 +3956,7 @@ tk = pytest.importorskip("tkinter")
 from lan_proxy_switcher.gui import AppWindow  # noqa: E402
 
 HIT_7890 = ScanHit("172.20.10.1", 7890, 12.0)
-HIT_1080 = ScanHit("172.20.10.1", 1080, 15.4)
+HIT_1082 = ScanHit("172.20.10.1", 1082, 15.4)
 
 
 class RecordingController:
@@ -4021,22 +4021,22 @@ def test_adapter_list_is_replaced_not_appended(window):
 # ---------- 扫描结果 ----------
 
 def test_hits_stream_in_one_by_one(window):
-    feed(window, ScanHitFound(HIT_7890), ScanHitFound(HIT_1080))
+    feed(window, ScanHitFound(HIT_7890), ScanHitFound(HIT_1082))
 
     assert [row[0:2] for row in rows(window.hit_tree)] == [
         ("172.20.10.1", "7890"),
-        ("172.20.10.1", "1080"),
+        ("172.20.10.1", "1082"),
     ]
 
 
 def test_connect_time_is_rendered_in_milliseconds(window):
-    feed(window, ScanHitFound(HIT_1080))
+    feed(window, ScanHitFound(HIT_1082))
 
     assert rows(window.hit_tree)[0][2] == "15ms"
 
 
 def test_scan_results_replace_the_streamed_rows(window):
-    feed(window, ScanHitFound(HIT_7890), ScanHitFound(HIT_1080))
+    feed(window, ScanHitFound(HIT_7890), ScanHitFound(HIT_1082))
     feed(window, ScanResults((HIT_7890,)))
 
     assert len(rows(window.hit_tree)) == 1
@@ -4122,12 +4122,12 @@ def test_switch_button_posts_the_selected_index(window):
 
 
 def test_use_button_posts_the_selected_hit(window):
-    feed(window, ScanResults((HIT_7890, HIT_1080)))
+    feed(window, ScanResults((HIT_7890, HIT_1082)))
     window.hit_tree.selection_set(window.hit_tree.get_children()[1])
 
     window.use_button.invoke()
 
-    assert window.controller.posted[-1] == UseHitRequested(HIT_1080)
+    assert window.controller.posted[-1] == UseHitRequested(HIT_1082)
 
 
 def test_use_button_needs_a_selection(window):

@@ -153,12 +153,12 @@ def test_gateway_hit_short_circuits_full_scan():
     hit = ScanHit("172.20.10.1", 7890, 12.0)
     scan_fn, calls = recording_scan_fn([[hit]])
 
-    result = discover(adapter, (7890, 1080), scan_fn, threading.Event())
+    result = discover(adapter, (7890, 1082), scan_fn, threading.Event())
 
     assert result.phase == "gateway"
     assert result.hits == (hit,)
     assert len(calls) == 1
-    assert calls[0] == [("172.20.10.1", 7890), ("172.20.10.1", 1080)]
+    assert calls[0] == [("172.20.10.1", 7890), ("172.20.10.1", 1082)]
 
 
 def test_falls_through_to_subnet_scan_when_gateway_is_silent():

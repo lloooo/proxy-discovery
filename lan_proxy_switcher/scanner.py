@@ -74,7 +74,7 @@ def enumerate_targets(
 def select_best(
     hits: Sequence[ScanHit], prefer_port: int, ports: Sequence[int]
 ) -> ScanHit | None:
-    """7890 > 1080，同端口取 TCP 建连耗时最低者。"""
+    """7890 > 1082，同端口取 TCP 建连耗时最低者。"""
     order = [prefer_port] + [port for port in ports if port != prefer_port]
     for port in order:
         candidates = [hit for hit in hits if hit.port == port]
