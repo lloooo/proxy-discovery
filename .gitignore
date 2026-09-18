@@ -5,5 +5,4 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
-*.spec
 config.json

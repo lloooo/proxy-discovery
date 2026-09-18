@@ -179,11 +179,19 @@ def current_identity() -> str:
 
 
 def switch_script(index: int, enabled: bool) -> str:
-    """启用/禁用网卡。index 强制转 int，杜绝命令注入。"""
+    """按 InterfaceIndex 找到网卡对象，再启用/禁用。
+
+    Enable-NetAdapter / Disable-NetAdapter 本身没有 -InterfaceIndex 参数；不能把
+    Get-NetAdapter 支持的参数直接传给它们。使用 InputObject 既保留索引这一稳定
+    身份，也避免把显示名称拼接进 PowerShell 命令。
+    """
     if isinstance(index, bool) or not isinstance(index, int):
         raise TypeError(f"InterfaceIndex 必须是整数，得到 {index!r}")
     verb = "Enable-NetAdapter" if enabled else "Disable-NetAdapter"
-    return f"{verb} -InterfaceIndex {int(index)} -Confirm:$false -ErrorAction Stop"
+    return (
+        f"$adapter = Get-NetAdapter -InterfaceIndex {int(index)} -IncludeHidden -ErrorAction Stop; "
+        f"{verb} -InputObject $adapter -Confirm:$false -ErrorAction Stop"
+    )
 
 
 class PowerShellNetworkService:

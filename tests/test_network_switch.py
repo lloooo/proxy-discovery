@@ -7,14 +7,16 @@ def test_enable_script_targets_the_interface_index():
     script = network.switch_script(23, True)
 
     assert "Enable-NetAdapter" in script
-    assert "-InterfaceIndex 23" in script
+    assert "Get-NetAdapter -InterfaceIndex 23" in script
+    assert "Enable-NetAdapter -InputObject $adapter" in script
 
 
 def test_disable_script_targets_the_interface_index():
     script = network.switch_script(25, False)
 
     assert "Disable-NetAdapter" in script
-    assert "-InterfaceIndex 25" in script
+    assert "Get-NetAdapter -InterfaceIndex 25" in script
+    assert "Disable-NetAdapter -InputObject $adapter" in script
 
 
 def test_script_never_prompts():
@@ -43,7 +45,8 @@ def test_set_adapter_enabled_invokes_the_script(monkeypatch):
 
     assert len(seen) == 1
     assert "Enable-NetAdapter" in seen[0]
-    assert "-InterfaceIndex 23" in seen[0]
+    assert "Get-NetAdapter -InterfaceIndex 23" in seen[0]
+    assert "Enable-NetAdapter -InputObject $adapter" in seen[0]
 
 
 def test_set_adapter_enabled_propagates_failure(monkeypatch):

@@ -15,7 +15,8 @@ from typing import Callable
 
 from . import scanner
 from .config import Config
-from .network import Adapter, current_identity, select_active
+from .monitor import MonitorError, NetworkChanged, ProxyLost, ProxyOk
+from .network import Adapter, AdapterStatus, current_identity, select_active
 from .proxy import ProxyState
 from .scanner import DiscoveryResult, ScanHit
 
@@ -48,6 +49,12 @@ class ScanFinished:
 
 
 @dataclass(frozen=True)
+class ScanHitReceived:
+    hit: ScanHit
+    token: object
+
+
+@dataclass(frozen=True)
 class UseHitRequested:
     hit: ScanHit
 
@@ -65,6 +72,19 @@ class RefreshAdaptersRequested:
 @dataclass(frozen=True)
 class Shutdown:
     pass
+
+
+@dataclass(frozen=True)
+class SwitchRequested:
+    adapter_index: int
+
+
+@dataclass(frozen=True)
+class SwitchFinished:
+    ok: bool
+    message: str
+    adapter_index: int
+    token: object
 
 
 # ---------- UI 事件 ----------
@@ -102,6 +122,9 @@ class StateChanged:
 
 
 class Controller:
+    DISABLE_TIMEOUT_S = 15.0
+    ENABLE_TIMEOUT_S = 30.0
+
     def __init__(
         self,
         cfg: Config,
@@ -115,6 +138,7 @@ class Controller:
         discover=scanner.discover,
         scan=scanner.scan,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._cfg = cfg
         self._network = network
@@ -126,6 +150,7 @@ class Controller:
         self._discover = discover
         self._scan = scan
         self._sleep = sleep
+        self._clock = clock
 
         self.inbox: "queue.Queue[object]" = queue.Queue()
         self.state = State.IDLE
@@ -136,15 +161,23 @@ class Controller:
 
         self._scan_token: object | None = None
         self._cancel = threading.Event()
+        self._switch_token: object | None = None
 
         self._handlers: dict[type, Callable[[object], None]] = {
             Start: self._on_start,
             ScanRequested: self._on_scan_requested,
             ScanFinished: self._on_scan_finished,
+            ScanHitReceived: self._on_scan_hit_received,
             UseHitRequested: self._on_use_hit,
             DisableProxyRequested: self._on_disable_proxy,
             RefreshAdaptersRequested: self._on_refresh,
             Shutdown: self._on_shutdown,
+            SwitchRequested: self._on_switch_requested,
+            SwitchFinished: self._on_switch_finished,
+            NetworkChanged: self._on_network_changed,
+            ProxyOk: self._on_proxy_ok,
+            ProxyLost: self._on_proxy_lost,
+            MonitorError: self._on_monitor_error,
         }
 
     # ---------- 队列 ----------
@@ -278,7 +311,7 @@ class Controller:
                     cfg.scan_timeout_ms,
                     cfg.scan_concurrency,
                     cancel,
-                    on_hit=lambda hit: ui.put(ScanHitFound(hit)),
+                    on_hit=lambda hit: self.post(ScanHitReceived(hit, token)),
                 )
 
             try:
@@ -288,6 +321,10 @@ class Controller:
             self.post(ScanFinished(result, target, token))
 
         self._spawn(job)
+
+    def _on_scan_hit_received(self, message: ScanHitReceived) -> None:
+        if message.token is self._scan_token:
+            self._ui.put(ScanHitFound(message.hit))
 
     def _on_scan_finished(self, message: ScanFinished) -> None:
         if message.token is not self._scan_token:
@@ -325,6 +362,104 @@ class Controller:
 
     def _on_refresh(self, _message: object) -> None:
         self._publish_adapters()
+
+    def _on_switch_requested(self, message: SwitchRequested) -> None:
+        """在工作线程中完成网卡切换，主状态机始终不阻塞。"""
+        self._cancel_scan()
+        adapters = self._publish_adapters()
+        target = next((adapter for adapter in adapters if adapter.index == message.adapter_index), None)
+        if target is None:
+            self._log(f"找不到 InterfaceIndex={message.adapter_index} 的网卡")
+            self._set_state(State.NO_PROXY)
+            return
+
+        token = object()
+        self._switch_token = token
+        self._set_state(State.SWITCHING)
+        self._log(f"开始切换到：{target.name}")
+
+        def wait_for(predicate: Callable[[list[Adapter]], bool], timeout: float) -> bool:
+            deadline = self._clock() + timeout
+            while True:
+                adapters_now = list(self._network.list_adapters())
+                if predicate(adapters_now):
+                    return True
+                if self._clock() >= deadline:
+                    return False
+                self._sleep(0.5)
+
+        def job() -> None:
+            try:
+                # 先关掉其余已启用网卡，确保有线与无线不会同时启用。
+                for adapter in self._network.list_adapters():
+                    if adapter.index == message.adapter_index or adapter.status is AdapterStatus.DISABLED:
+                        continue
+                    self._log(f"正在禁用：{adapter.name}")
+                    self._network.set_adapter_enabled(adapter.index, False)
+                    disabled = wait_for(
+                        lambda current, index=adapter.index: any(
+                            item.index == index and item.status is AdapterStatus.DISABLED
+                            for item in current
+                        ),
+                        self.DISABLE_TIMEOUT_S,
+                    )
+                    if not disabled:
+                        raise TimeoutError(f"等待 {adapter.name} 禁用超时")
+
+                self._log(f"正在启用：{target.name}")
+                self._network.set_adapter_enabled(message.adapter_index, True)
+                ready = wait_for(
+                    lambda current: any(
+                        item.index == message.adapter_index
+                        and item.status is AdapterStatus.UP
+                        and item.ipv4 is not None
+                        and item.prefix_length is not None
+                        for item in current
+                    ),
+                    self.ENABLE_TIMEOUT_S,
+                )
+                if not ready:
+                    raise TimeoutError(f"等待 {target.name} 取得 IPv4 超时")
+            except Exception as exc:
+                self.post(SwitchFinished(False, f"网卡切换失败：{exc}", message.adapter_index, token))
+            else:
+                self.post(SwitchFinished(True, f"已切换到：{target.name}", message.adapter_index, token))
+
+        self._spawn(job)
+
+    def _on_switch_finished(self, message: SwitchFinished) -> None:
+        if message.token is not self._switch_token:
+            return
+        self._switch_token = None
+        self._publish_adapters()
+        self._log(message.message)
+        if not message.ok:
+            self._set_state(State.NO_PROXY)
+            return
+        self._begin_scan(message.adapter_index)
+
+    def _on_network_changed(self, _message: NetworkChanged) -> None:
+        if self.state is State.SWITCHING:
+            self._log("切换网卡期间忽略网络变化")
+            return
+        self._log("网络状态已稳定变化，重新扫描代理")
+        adapters = self._publish_adapters()
+        if select_active(adapters) is None:
+            self._log("没有可用网卡，等待网络恢复")
+            self._cancel_scan()
+            self._set_state(State.NO_PROXY)
+            return
+        self._begin_scan(None)
+
+    def _on_proxy_ok(self, message: ProxyOk) -> None:
+        self._ui.put(ProxyStatus(message.server, f"TCP 连接正常（{message.latency_ms:.0f}ms）"))
+
+    def _on_proxy_lost(self, message: ProxyLost) -> None:
+        self._log(f"代理 {message.server} 连续 {message.failures} 次探测失败，判定失效并重新扫描")
+        self._begin_scan(None)
+
+    def _on_monitor_error(self, message: MonitorError) -> None:
+        self._log(f"监控异常：{message.message}")
 
     def _on_shutdown(self, _message: object) -> None:
         self._cancel_scan()

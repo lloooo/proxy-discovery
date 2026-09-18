@@ -34,10 +34,12 @@ WIFI = make_adapter(
 
 
 class FakeNetwork:
-    def __init__(self, adapters):
+    def __init__(self, adapters, ip_on_enable=None):
         self.adapters = list(adapters)
         self.switches = []
         self.fail_on = set()
+        # 启用某张网卡后它应当拿到的 (ipv4, prefix_length)；不给就保持原样
+        self.ip_on_enable = ip_on_enable or {}
 
     def list_adapters(self):
         return list(self.adapters)
@@ -46,12 +48,21 @@ class FakeNetwork:
         if index in self.fail_on:
             raise RuntimeError(f"网卡 {index} 拒绝操作")
         self.switches.append((index, enabled))
-        self.adapters = [
-            replace(a, status=AdapterStatus.UP if enabled else AdapterStatus.DISABLED)
-            if a.index == index
-            else a
-            for a in self.adapters
-        ]
+        updated = []
+        for adapter in self.adapters:
+            if adapter.index != index:
+                updated.append(adapter)
+                continue
+            if enabled:
+                ipv4, prefix = self.ip_on_enable.get(index, (adapter.ipv4, adapter.prefix_length))
+                updated.append(
+                    replace(adapter, status=AdapterStatus.UP, ipv4=ipv4, prefix_length=prefix)
+                )
+            else:
+                updated.append(
+                    replace(adapter, status=AdapterStatus.DISABLED, ipv4=None, prefix_length=None)
+                )
+        self.adapters = updated
 
 
 class FakeProxy:
@@ -104,3 +115,16 @@ def drain(ui_queue):
 
 def events_of(ui_queue, kind):
     return [event for event in drain(ui_queue) if isinstance(event, kind)]
+
+
+class FakeClock:
+    """可控时钟：sleep 直接推进时间，等待循环因而瞬间收敛。"""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
