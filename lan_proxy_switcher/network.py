@@ -178,6 +178,14 @@ def current_identity() -> str:
     return run_powershell(IDENTITY_SCRIPT).strip()
 
 
+def switch_script(index: int, enabled: bool) -> str:
+    """启用/禁用网卡。index 强制转 int，杜绝命令注入。"""
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise TypeError(f"InterfaceIndex 必须是整数，得到 {index!r}")
+    verb = "Enable-NetAdapter" if enabled else "Disable-NetAdapter"
+    return f"{verb} -InterfaceIndex {int(index)} -Confirm:$false -ErrorAction Stop"
+
+
 class PowerShellNetworkService:
     def list_adapters(self) -> list[Adapter]:
         raw = run_powershell(QUERY_SCRIPT)
@@ -188,3 +196,6 @@ class PowerShellNetworkService:
         if not isinstance(payload, dict):
             raise NetworkError(f"网卡查询输出结构异常：{raw[:200]!r}")
         return parse_snapshot(payload)
+
+    def set_adapter_enabled(self, index: int, enabled: bool) -> None:
+        run_powershell(switch_script(index, enabled), timeout=60.0)
