@@ -1,0 +1,75 @@
+{
+  "adapters": [
+    {
+      "Name": "Ethernet 10",
+      "InterfaceIndex": 32,
+      "InterfaceDescription": "Apple Mobile Device Ethernet #8",
+      "Status": "Up",
+      "MediaType": "802.3",
+      "PhysicalMediaType": "Unspecified",
+      "HardwareInterface": true,
+      "Virtual": false
+    },
+    {
+      "Name": "Ethernet",
+      "InterfaceIndex": 25,
+      "InterfaceDescription": "Realtek PCIe GbE Family Controller",
+      "Status": "Up",
+      "MediaType": "802.3",
+      "PhysicalMediaType": "802.3",
+      "HardwareInterface": true,
+      "Virtual": false
+    },
+    {
+      "Name": "Wi-Fi",
+      "InterfaceIndex": 23,
+      "InterfaceDescription": "RZ616 Wi-Fi 6E 160MHz",
+      "Status": "Disconnected",
+      "MediaType": "Native 802.11",
+      "PhysicalMediaType": "Native 802.11",
+      "HardwareInterface": true,
+      "Virtual": false
+    },
+    {
+      "Name": "vEthernet (Default Switch)",
+      "InterfaceIndex": 40,
+      "InterfaceDescription": "Hyper-V Virtual Ethernet Adapter",
+      "Status": "Up",
+      "MediaType": "802.3",
+      "PhysicalMediaType": "Unspecified",
+      "HardwareInterface": false,
+      "Virtual": true
+    },
+    {
+      "Name": "VMware Network Adapter VMnet8",
+      "InterfaceIndex": 33,
+      "InterfaceDescription": "VMware Virtual Ethernet Adapter for VMnet8",
+      "Status": "Up",
+      "MediaType": "802.3",
+      "PhysicalMediaType": "802.3",
+      "HardwareInterface": false,
+      "Virtual": true
+    },
+    {
+      "Name": "Tailscale",
+      "InterfaceIndex": 8,
+      "InterfaceDescription": "Tailscale Tunnel",
+      "Status": "Up",
+      "MediaType": "IP",
+      "PhysicalMediaType": "Unspecified",
+      "HardwareInterface": false,
+      "Virtual": true
+    }
+  ],
+  "addresses": [
+    {"InterfaceIndex": 32, "IPAddress": "172.20.10.7", "PrefixLength": 28},
+    {"InterfaceIndex": 25, "IPAddress": "10.0.0.2", "PrefixLength": 24},
+    {"InterfaceIndex": 23, "IPAddress": "169.254.25.234", "PrefixLength": 16},
+    {"InterfaceIndex": 40, "IPAddress": "172.22.112.1", "PrefixLength": 20},
+    {"InterfaceIndex": 33, "IPAddress": "192.168.137.1", "PrefixLength": 24},
+    {"InterfaceIndex": 8, "IPAddress": "100.111.31.82", "PrefixLength": 32}
+  ],
+  "routes": [
+    {"InterfaceIndex": 32, "NextHop": "172.20.10.1", "RouteMetric": 0, "InterfaceMetric": 25}
+  ]
+}
