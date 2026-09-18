@@ -104,7 +104,7 @@ def test_adapter_query_failure_becomes_an_error_event():
 
 def test_no_proxy_means_no_probing():
     calls = []
-    state = build(probe=lambda *args: calls.append(args) or (None, 10061))
+    state = build(probe=lambda *args: calls.append(args) or (None, 10061), network_poll_interval_s=10_000.0)
 
     state.tick(0.0)
     state.tick(30.0)
@@ -114,7 +114,7 @@ def test_no_proxy_means_no_probing():
 
 
 def test_successful_check_emits_proxy_ok():
-    state = build(probe=hit_probe(12.5))
+    state = build(probe=hit_probe(12.5), network_poll_interval_s=10_000.0)
     state.set_proxy("172.20.10.1:7890")
 
     state.tick(0.0)
@@ -130,7 +130,7 @@ def test_probe_receives_ip_port_and_timeout_in_seconds():
         calls.append((ip, port, timeout_s))
         return ScanHit(ip, port, 1.0), None
 
-    state = build(probe=recording_probe, scan_timeout_ms=500)
+    state = build(probe=recording_probe, scan_timeout_ms=500, network_poll_interval_s=10_000.0)
     state.set_proxy("172.20.10.1:7890")
     state.tick(0.0)
     state.tick(30.0)
@@ -139,7 +139,7 @@ def test_probe_receives_ip_port_and_timeout_in_seconds():
 
 
 def test_proxy_lost_only_after_the_configured_number_of_failures():
-    state = build(probe=fail_probe, proxy_check_failures=3)
+    state = build(probe=fail_probe, proxy_check_failures=3, network_poll_interval_s=10_000.0)
     state.set_proxy("10.0.0.20:7890")
     state.tick(0.0)
 
@@ -150,7 +150,7 @@ def test_proxy_lost_only_after_the_configured_number_of_failures():
 
 def test_a_success_resets_the_failure_counter():
     outcomes = [(None, 10061), (None, 10061), (ScanHit("10.0.0.20", 7890, 9.0), None), (None, 10061)]
-    state = build(probe=lambda *args: outcomes.pop(0), proxy_check_failures=3)
+    state = build(probe=lambda *args: outcomes.pop(0), proxy_check_failures=3, network_poll_interval_s=10_000.0)
     state.set_proxy("10.0.0.20:7890")
     state.tick(0.0)
 
@@ -162,7 +162,7 @@ def test_a_success_resets_the_failure_counter():
 
 
 def test_changing_the_proxy_resets_the_failure_counter():
-    state = build(probe=fail_probe, proxy_check_failures=2)
+    state = build(probe=fail_probe, proxy_check_failures=2, network_poll_interval_s=10_000.0)
     state.set_proxy("10.0.0.20:7890")
     state.tick(0.0)
     state.tick(30.0)
@@ -171,6 +171,24 @@ def test_changing_the_proxy_resets_the_failure_counter():
     state.tick(60.0)
 
     assert state.tick(90.0) == []
+
+
+def test_both_timers_can_fire_in_one_tick():
+    """一次 tick 可能同时产出网络变化与代理探测两类事件，顺序为网络在前。"""
+    state = build(
+        list_adapters=lambda: [adapter()],
+        probe=hit_probe(12.5),
+        network_poll_interval_s=5.0,
+    )
+    state.set_proxy("172.20.10.1:7890")
+    state.tick(0.0)  # 建立基线，不上报
+
+    events = state.tick(30.0)
+
+    assert events == [
+        NetworkChanged((adapter(),)),
+        ProxyOk("172.20.10.1:7890", 12.5),
+    ]
 
 
 # ---------- 线程外壳 ----------
