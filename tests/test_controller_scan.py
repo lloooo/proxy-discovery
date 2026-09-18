@@ -258,6 +258,19 @@ def test_use_hit_applies_the_chosen_result(cfg, ui):
     assert controller.state is State.PROXY_ACTIVE
 
 
+def test_manual_pick_is_not_overwritten_by_an_in_flight_scan(cfg, ui):
+    """用户手动选定代理后，在途扫描的结果不许在背后把它覆盖掉。"""
+    proxy = FakeProxy()
+    controller, _ = build(
+        cfg, ui, proxy=proxy, discovery=DiscoveryResult((HIT_7890,), "gateway", "网关命中")
+    )
+
+    run_all(controller, Start(), UseHitRequested(HIT_1080))
+
+    assert proxy.applied == ["172.20.10.1:1080"]
+    assert controller.state is State.PROXY_ACTIVE
+
+
 def test_disable_proxy_request_turns_it_off(cfg, ui):
     proxy = FakeProxy()
     controller, _ = build(

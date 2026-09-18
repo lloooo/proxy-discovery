@@ -316,6 +316,7 @@ class Controller:
             self._set_state(State.NO_PROXY)
 
     def _on_use_hit(self, message: UseHitRequested) -> None:
+        self._cancel_scan()
         self._apply_hit(message.hit)
 
     def _on_disable_proxy(self, _message: object) -> None:
