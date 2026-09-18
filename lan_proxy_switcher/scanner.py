@@ -150,13 +150,10 @@ def scan(
     errors: dict[int, int] = {}
     completed = 0
 
+    cancelled = False
     with ThreadPoolExecutor(max_workers=min(concurrency, len(targets))) as pool:
         futures = [pool.submit(probe, ip, port, timeout_s) for ip, port in targets]
         for future in as_completed(futures):
-            if cancel.is_set():
-                for pending in futures:
-                    pending.cancel()
-                break
             hit, code = future.result()
             completed += 1
             if hit is not None:
@@ -165,9 +162,14 @@ def scan(
                     on_hit(hit)
             elif code is not None:
                 errors[code] = errors.get(code, 0) + 1
+            if cancel.is_set():
+                cancelled = True
+                for pending in futures:
+                    pending.cancel()
+                break
 
     hits.sort(key=lambda hit: (hit.port, hit.latency_ms))
-    return ScanReport(tuple(hits), len(targets), completed, errors, cancel.is_set())
+    return ScanReport(tuple(hits), len(targets), completed, errors, cancelled)
 
 
 def discover(

@@ -103,6 +103,29 @@ def test_scan_of_unroutable_address_yields_no_hit():
     assert report.hits == ()
 
 
+def test_completed_sweep_is_not_reported_as_cancelled(open_port):
+    """回归：跑完的扫描不许因为事件在收尾后置位就被报成取消，否则真实命中会被 discover 丢弃。"""
+
+    class FlipsAfterTheLoop:
+        """前 1 次 is_set() 返回 False（循环内检查），之后返回 True（旧代码在 return 处的重采样）。"""
+
+        def __init__(self):
+            self.checks = 0
+
+        def is_set(self):
+            self.checks += 1
+            return self.checks >= 2
+
+    port = open_port()
+    cancel = FlipsAfterTheLoop()
+
+    report = scan([("127.0.0.1", port)], 500, 10, cancel)
+
+    assert report.cancelled is False
+    assert [(hit.ip, hit.port) for hit in report.hits] == [("127.0.0.1", port)]
+    assert report.completed == 1
+
+
 # ---------- 两阶段发现 ----------
 
 @dataclass(frozen=True)
