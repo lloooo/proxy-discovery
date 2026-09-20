@@ -148,18 +148,30 @@ def test_dhcp_script_enables_dhcp():
     assert "-Dhcp Enabled" in script
 
 
-def test_dhcp_script_clears_the_static_address_and_route():
+def test_dhcp_script_does_not_clear_the_address_first():
+    """预先删地址正是 DORA 不被触发的原因。
+
+    _clear_ip_script 是为反方向写的（DHCP 还开着时 New-NetIPAddress 会失败）。
+    用在这个方向上，等于把 static→DHCP 的迁移悄悄做完了，再标 Dhcp Enabled 就成了
+    一次什么都不触发的空状态变更，网卡停在 APIPA 上。不删地址，Windows 自己在这
+    次状态变化里走完 DORA——实测拿到 PrefixOrigin=Dhcp 的真实地址。
+    """
     script = network.dhcp_script(23)
 
-    assert "Remove-NetIPAddress" in script
-    assert "Remove-NetRoute" in script
+    assert "Remove-NetIPAddress" not in script
+    assert "Remove-NetRoute" not in script
 
 
-def test_dhcp_script_resets_the_dns_servers():
-    """静态 DNS 不会随地址一起消失，必须显式重置回自动获取。"""
+def test_dhcp_script_does_not_restart_the_adapter():
+    """重启网卡会拆掉 802.11 关联，Wi-Fi 不一定自动连得回来。"""
     script = network.dhcp_script(23)
 
-    assert "-ResetServerAddresses" in script
+    assert "Restart-NetAdapter" not in script
+    assert "RenewDHCPLease" not in script
+
+
+def test_dhcp_script_still_checks_that_the_adapter_exists():
+    assert "Get-NetAdapter -InterfaceIndex 23" in network.dhcp_script(23)
 
 
 def test_dhcp_script_rejects_a_non_integer_index():
@@ -168,7 +180,11 @@ def test_dhcp_script_rejects_a_non_integer_index():
 
 
 def test_dhcp_script_never_prompts():
-    assert network.dhcp_script(23).count("-Confirm:$false") == 2
+    """-NonInteractive 的子进程里任何确认提示都会挂死。现在一个会提示的 cmdlet 都不用。"""
+    script = network.dhcp_script(23)
+
+    for cmdlet in ("Remove-NetIPAddress", "Remove-NetRoute", "Restart-NetAdapter"):
+        assert cmdlet not in script
 
 
 # ---------- 服务层 ----------

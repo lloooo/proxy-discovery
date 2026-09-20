@@ -293,10 +293,19 @@ def static_ip_script(index: int, profile: StaticIpProfile) -> str:
 
 
 def dhcp_script(index: int) -> str:
+    """切回自动获取：只改寻址方式，不要预先清地址。
+
+    _clear_ip_script 是为反方向写的（DHCP 还开着时 New-NetIPAddress 会失败）。
+    用在这个方向上会毁掉整件事：地址被删掉之后，static→DHCP 的迁移已经悄悄发生
+    完了，再把 Dhcp 标成 Enabled 就成了一次什么都不触发的空状态变更，DHCP 客户端
+    不会去要地址，网卡一直停在 APIPA 上。续租也救不回来——RenewDHCPLease 只能续
+    已有的租约，这时返回 82。让 Windows 自己在这次状态变化里完成迁移，它会走完
+    DORA，且全程不动 802.11 关联。
+    """
     idx = _interface_index(index)
     return (
-        _clear_ip_script(idx)
-        + f"Set-NetIPInterface -InterfaceIndex {idx} -AddressFamily IPv4 "
+        f"Get-NetAdapter -InterfaceIndex {idx} -ErrorAction Stop | Out-Null; "
+        f"Set-NetIPInterface -InterfaceIndex {idx} -AddressFamily IPv4 "
         "-Dhcp Enabled -ErrorAction Stop; "
         + _dns_script(idx, ())
     )

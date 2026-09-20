@@ -37,7 +37,7 @@ WIFI = make_adapter(
 
 
 class FakeNetwork:
-    def __init__(self, adapters, ip_on_enable=None, ip_on_dhcp=None):
+    def __init__(self, adapters, ip_on_enable=None, ip_on_dhcp=None, dhcp_mode_applies=True):
         self.adapters = list(adapters)
         self.switches = []
         self.ip_calls = []
@@ -46,6 +46,8 @@ class FakeNetwork:
         self.ip_on_enable = ip_on_enable or {}
         # 切回 DHCP 后租约给出的 (ipv4, prefix_length)；None 表示始终拿不到地址
         self.ip_on_dhcp = ip_on_dhcp or {}
+        # False 表示 Set-NetIPInterface 没能把寻址方式改过来（模式本身就没落地）
+        self.dhcp_mode_applies = dhcp_mode_applies
 
     def _replace_adapter(self, index, **changes):
         self.adapters = [
@@ -76,7 +78,7 @@ class FakeNetwork:
             ipv4=lease[0],
             prefix_length=lease[1],
             gateway=None,
-            dhcp=True,
+            dhcp=True if self.dhcp_mode_applies else False,
         )
 
     def list_adapters(self):

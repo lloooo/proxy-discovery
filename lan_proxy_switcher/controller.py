@@ -168,6 +168,9 @@ class Controller:
     DISABLE_TIMEOUT_S = 15.0
     ENABLE_TIMEOUT_S = 30.0
     IP_CONFIG_TIMEOUT_S = 30.0
+    DHCP_MODE_TIMEOUT_S = 10.0
+    # 租约要等 Windows 自己走完 DORA，无线上可能好几秒；只在失败时才花满
+    DHCP_LEASE_TIMEOUT_S = 60.0
 
     def __init__(
         self,
@@ -582,16 +585,29 @@ class Controller:
 
         self._log(f"正在把 {target.name} 切回自动获取（DHCP）")
 
+        def matches(current: list[Adapter], predicate: Callable[[Adapter], bool]) -> bool:
+            return any(item.index == target.index and predicate(item) for item in current)
+
         def apply() -> None:
             self._network.set_dhcp(target.index)
-            ready = self._wait_for(
-                lambda current: any(
-                    item.index == target.index and item.ipv4 is not None for item in current
-                ),
-                self.IP_CONFIG_TIMEOUT_S,
+            # 两件事必须分开报：寻址方式有没有落地是确定的、快的；能不能拿到租约
+            # 取决于链路和 DHCP 服务器。混成一条消息就看不出该去查哪边。
+            switched = self._wait_for(
+                lambda current: matches(current, lambda item: item.dhcp is True),
+                self.DHCP_MODE_TIMEOUT_S,
             )
-            if not ready:
-                raise TimeoutError(f"等待 {target.name} 取得 DHCP 地址超时")
+            if not switched:
+                raise TimeoutError(f"{target.name} 的寻址方式没有变成自动获取")
+
+            leased = self._wait_for(
+                lambda current: matches(current, lambda item: item.ipv4 is not None),
+                self.DHCP_LEASE_TIMEOUT_S,
+            )
+            if not leased:
+                raise TimeoutError(
+                    f"{target.name} 已改为自动获取，但 {self.DHCP_LEASE_TIMEOUT_S:.0f} "
+                    "秒内没有拿到地址"
+                )
 
         self._run_ip_config(
             target,

@@ -19,10 +19,12 @@ ETHERNET = make_adapter()
 PROFILE = StaticIpProfile("192.168.1.50", 24, "192.168.1.1", ("8.8.8.8",))
 
 
-def build(cfg, ui, adapters=None, ip_on_dhcp=None, on_scan=None):
+def build(cfg, ui, adapters=None, ip_on_dhcp=None, on_scan=None, dhcp_mode_applies=True):
     clock = FakeClock()
     network = FakeNetwork(
-        adapters if adapters is not None else [ETHERNET, WIFI], ip_on_dhcp=ip_on_dhcp
+        adapters if adapters is not None else [ETHERNET, WIFI],
+        ip_on_dhcp=ip_on_dhcp,
+        dhcp_mode_applies=dhcp_mode_applies,
     )
     saved = []
 
@@ -148,8 +150,37 @@ def test_dhcp_times_out_when_no_lease_arrives(cfg, ui):
 
     run_all(controller, Start(), SetDhcpRequested(32))
 
-    assert any("超时" in line for line in logs(ui))
+    assert any("失败" in line for line in logs(ui))
     assert controller.state is State.NO_PROXY
+
+
+def test_dhcp_lease_window_is_generous(cfg, ui):
+    """DORA 在无线上可能要好几秒。等待上限只在失败时才花满，宁可长一点也别误报失败。"""
+    controller, _, _ = build(cfg, ui)
+
+    assert controller.DHCP_LEASE_TIMEOUT_S >= 60.0
+    assert controller.IP_CONFIG_TIMEOUT_S == 30.0  # 静态那条路不受影响
+
+
+def test_dhcp_lease_timeout_says_the_mode_did_switch(cfg, ui):
+    """老消息只说「超时」，看不出是配置没落地还是没拿到租约——两者的处置完全不同。"""
+    controller, _, _ = build(cfg, ui, ip_on_dhcp={32: (None, None)})
+
+    run_all(controller, Start(), SetDhcpRequested(32))
+
+    line = next(line for line in logs(ui) if "失败" in line)
+    assert "自动获取" in line
+    assert "没有拿到地址" in line
+
+
+def test_dhcp_reports_when_the_mode_itself_never_took_effect(cfg, ui):
+    controller, _, _ = build(cfg, ui, dhcp_mode_applies=False)
+
+    run_all(controller, Start(), SetDhcpRequested(32))
+
+    line = next(line for line in logs(ui) if "失败" in line)
+    assert "寻址方式" in line
+    assert "没有拿到地址" not in line
 
 
 def test_dhcp_keeps_the_saved_static_profile(cfg, ui):
