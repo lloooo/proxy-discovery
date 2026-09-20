@@ -7,7 +7,7 @@ import queue
 import threading
 
 from lan_proxy_switcher import __version__
-from lan_proxy_switcher.config import config_path, load
+from lan_proxy_switcher.config import config_path, load, save
 from lan_proxy_switcher.controller import Controller, LogLine, Start
 from lan_proxy_switcher.gui import Application
 from lan_proxy_switcher.monitor import MonitorState, MonitorThread
@@ -33,7 +33,16 @@ def main() -> None:
         scan_timeout_ms=cfg.scan_timeout_ms,
         proxy_check_failures=cfg.proxy_check_failures,
     )
-    controller = Controller(cfg, network, proxy, monitor_state, ui, spawn)
+    def save_config(updated) -> None:
+        # 写盘失败不该影响已经生效的网络设置，只记日志
+        try:
+            save(config_path(), updated)
+        except OSError as exc:
+            ui.put(LogLine(f"配置写回失败：{exc}"))
+
+    controller = Controller(
+        cfg, network, proxy, monitor_state, ui, spawn, save_config=save_config
+    )
     controller_thread = threading.Thread(target=controller.run, name="controller", daemon=True)
     monitor_thread = MonitorThread(monitor_state, controller.inbox)
 

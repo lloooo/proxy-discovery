@@ -17,8 +17,11 @@ def make_adapter(
     prefix_length=28,
     gateway="172.20.10.1",
     metric=25,
+    dhcp=None,
 ):
-    return Adapter(name, index, f"{name} 描述", kind, status, ipv4, prefix_length, gateway, metric)
+    return Adapter(
+        name, index, f"{name} 描述", kind, status, ipv4, prefix_length, gateway, metric, dhcp
+    )
 
 
 WIFI = make_adapter(
@@ -34,12 +37,47 @@ WIFI = make_adapter(
 
 
 class FakeNetwork:
-    def __init__(self, adapters, ip_on_enable=None):
+    def __init__(self, adapters, ip_on_enable=None, ip_on_dhcp=None):
         self.adapters = list(adapters)
         self.switches = []
+        self.ip_calls = []
         self.fail_on = set()
         # 启用某张网卡后它应当拿到的 (ipv4, prefix_length)；不给就保持原样
         self.ip_on_enable = ip_on_enable or {}
+        # 切回 DHCP 后租约给出的 (ipv4, prefix_length)；None 表示始终拿不到地址
+        self.ip_on_dhcp = ip_on_dhcp or {}
+
+    def _replace_adapter(self, index, **changes):
+        self.adapters = [
+            replace(adapter, **changes) if adapter.index == index else adapter
+            for adapter in self.adapters
+        ]
+
+    def set_static_ip(self, index, profile):
+        if index in self.fail_on:
+            raise RuntimeError(f"网卡 {index} 拒绝操作")
+        self.ip_calls.append(("static", index, profile))
+        self._replace_adapter(
+            index,
+            status=AdapterStatus.UP,
+            ipv4=profile.ip,
+            prefix_length=profile.prefix_length,
+            gateway=profile.gateway,
+            dhcp=False,
+        )
+
+    def set_dhcp(self, index):
+        if index in self.fail_on:
+            raise RuntimeError(f"网卡 {index} 拒绝操作")
+        self.ip_calls.append(("dhcp", index, None))
+        lease = self.ip_on_dhcp.get(index, (None, None))
+        self._replace_adapter(
+            index,
+            ipv4=lease[0],
+            prefix_length=lease[1],
+            gateway=None,
+            dhcp=True,
+        )
 
     def list_adapters(self):
         return list(self.adapters)
@@ -94,6 +132,19 @@ class FakeMonitor:
 
     def set_proxy(self, server):
         self.servers.append(server)
+
+
+@pytest.fixture(scope="session")
+def tk_root():
+    """整个会话共用一个 root：反复新建 Tk() 偶尔会读不到 init.tcl。"""
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # 无显示环境
+        pytest.skip(f"Tk 不可用：{exc}")
+    root.withdraw()
+    yield root
+    root.destroy()
 
 
 @pytest.fixture

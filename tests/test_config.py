@@ -1,6 +1,6 @@
 import json
 
-from lan_proxy_switcher import config
+from lan_proxy_switcher import config, network
 
 
 def test_missing_file_writes_defaults(tmp_path):
@@ -78,3 +78,75 @@ def test_bool_is_not_accepted_as_int(tmp_path):
     cfg = config.load(path, lambda _line: None)
 
     assert cfg.scan_timeout_ms == 500
+
+
+# ---------- 静态 IP 档位 ----------
+
+def test_static_ip_profiles_default_to_empty(tmp_path):
+    cfg = config.load(tmp_path / "config.json")
+
+    assert cfg.static_ip_profiles == {}
+
+
+def test_static_ip_profile_is_loaded(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"staticIpProfiles": {
+        "Wi-Fi": {"ip": "192.168.1.50", "prefix": 24,
+                  "gateway": "192.168.1.1", "dns": ["8.8.8.8", "1.1.1.1"]}
+    }}), encoding="utf-8")
+
+    profile = config.load(path).static_ip_profiles["Wi-Fi"]
+
+    assert profile.ip == "192.168.1.50"
+    assert profile.prefix_length == 24
+    assert profile.gateway == "192.168.1.1"
+    assert profile.dns == ("8.8.8.8", "1.1.1.1")
+
+
+def test_static_ip_profile_without_gateway_or_dns_is_accepted(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"staticIpProfiles": {
+        "Ethernet": {"ip": "10.0.0.2", "prefix": 8}
+    }}), encoding="utf-8")
+
+    profile = config.load(path).static_ip_profiles["Ethernet"]
+
+    assert profile.gateway is None
+    assert profile.dns == ()
+
+
+def test_static_ip_profile_survives_a_save_load_round_trip(tmp_path):
+    path = tmp_path / "config.json"
+    cfg = config.Config(static_ip_profiles={
+        "Wi-Fi": network.StaticIpProfile("192.168.1.50", 24, "192.168.1.1", ("8.8.8.8",))
+    })
+
+    config.save(path, cfg)
+
+    assert config.load(path).static_ip_profiles == cfg.static_ip_profiles
+
+
+def test_illegal_static_ip_profile_is_dropped_and_logged(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"staticIpProfiles": {
+        "Wi-Fi": {"ip": "192.168.1.999", "prefix": 24},
+        "Ethernet": {"ip": "10.0.0.2", "prefix": 8},
+    }}), encoding="utf-8")
+    lines = []
+
+    cfg = config.load(path, lines.append)
+
+    assert "Wi-Fi" not in cfg.static_ip_profiles
+    assert "Ethernet" in cfg.static_ip_profiles
+    assert any("Wi-Fi" in line for line in lines)
+
+
+def test_static_ip_profiles_of_the_wrong_shape_fall_back_to_empty(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"staticIpProfiles": ["Wi-Fi"]}), encoding="utf-8")
+    lines = []
+
+    cfg = config.load(path, lines.append)
+
+    assert cfg.static_ip_profiles == {}
+    assert any("staticIpProfiles" in line for line in lines)

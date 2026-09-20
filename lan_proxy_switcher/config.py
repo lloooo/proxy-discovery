@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
+
+from .network import StaticIpProfile
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,8 @@ class Config:
     auto_set_proxy: bool = True
     disable_proxy_when_unavailable: bool = False
     restore_proxy_on_exit: bool = False
+    # 网卡名 → 上次填写的静态 IP 档位，供弹窗预填与一键套用
+    static_ip_profiles: dict[str, StaticIpProfile] = field(default_factory=dict)
 
 
 # JSON 键（camelCase，规格第 12 节）↔ Config 字段（snake_case）
@@ -35,6 +39,7 @@ JSON_KEYS: dict[str, str] = {
     "autoSetProxy": "auto_set_proxy",
     "disableProxyWhenUnavailable": "disable_proxy_when_unavailable",
     "restoreProxyOnExit": "restore_proxy_on_exit",
+    "staticIpProfiles": "static_ip_profiles",
 }
 
 
@@ -69,6 +74,44 @@ def _flag(value: object) -> bool:
     return value
 
 
+def _static_ip_profiles(
+    value: object, log: Callable[[str], None]
+) -> dict[str, StaticIpProfile]:
+    """逐条校验。一张网卡的档位写坏了，不该拖累其余网卡。"""
+    if not isinstance(value, dict):
+        log(f"配置项 staticIpProfiles 非法：必须是对象，得到 {type(value).__name__}，改用空档位")
+        return {}
+
+    profiles: dict[str, StaticIpProfile] = {}
+    for name, raw in value.items():
+        if not isinstance(raw, dict):
+            log(f"静态 IP 档位 {name} 非法：必须是对象，已丢弃")
+            continue
+        try:
+            profiles[name] = StaticIpProfile(
+                ip=raw.get("ip"),
+                prefix_length=raw.get("prefix"),
+                gateway=raw.get("gateway"),
+                dns=tuple(raw.get("dns") or ()),
+            )
+        except (ValueError, TypeError) as exc:
+            log(f"静态 IP 档位 {name} 非法：{exc}，已丢弃")
+    return profiles
+
+
+def _profiles_to_json(profiles: dict[str, StaticIpProfile]) -> dict[str, object]:
+    return {
+        name: {
+            "ip": profile.ip,
+            "prefix": profile.prefix_length,
+            "gateway": profile.gateway,
+            "dns": list(profile.dns),
+        }
+        for name, profile in profiles.items()
+    }
+
+
+# staticIpProfiles 不在这里：它要逐条记日志，需要 load 传进来的 log
 VALIDATORS: dict[str, Callable[[object], object]] = {
     "ports": _ports,
     "prefer_port": _int_range(1, 65535),
@@ -94,7 +137,10 @@ def to_json_dict(cfg: Config) -> dict[str, object]:
     out: dict[str, object] = {}
     for json_key, field_name in JSON_KEYS.items():
         value = getattr(cfg, field_name)
-        out[json_key] = list(value) if isinstance(value, tuple) else value
+        if field_name == "static_ip_profiles":
+            out[json_key] = _profiles_to_json(value)
+        else:
+            out[json_key] = list(value) if isinstance(value, tuple) else value
     return out
 
 
@@ -123,12 +169,15 @@ def load(path: Path, log: Callable[[str], None] = lambda _line: None) -> Config:
 
     values: dict[str, object] = {}
     for json_key, field_name in JSON_KEYS.items():
-        if json_key not in raw:
+        if json_key not in raw or field_name not in VALIDATORS:
             continue
         try:
             values[field_name] = VALIDATORS[field_name](raw[json_key])
         except ValueError as exc:
             log(f"配置项 {json_key} 非法：{exc}，使用默认值")
+
+    if "staticIpProfiles" in raw:
+        values["static_ip_profiles"] = _static_ip_profiles(raw["staticIpProfiles"], log)
 
     cfg = Config(**values)  # type: ignore[arg-type]
     if cfg.prefer_port not in cfg.ports:

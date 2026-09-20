@@ -131,6 +131,40 @@ def test_lowest_interface_metric_wins_when_several_routes(snapshot):
     assert by_name(parse_snapshot(snapshot), "Ethernet 10").metric == 5
 
 
+# ---------- 寻址方式 ----------
+
+def test_dhcp_enabled_is_parsed(adapters):
+    assert by_name(adapters, "Ethernet 10").dhcp is True
+
+
+def test_dhcp_disabled_means_a_static_address(adapters):
+    assert by_name(adapters, "Ethernet").dhcp is False
+
+
+def test_adapter_without_an_ip_interface_row_has_unknown_dhcp(adapters):
+    """已禁用的网卡不会出现在 Get-NetIPInterface 里。"""
+    assert by_name(adapters, "Wi-Fi").dhcp is None
+
+
+def test_numeric_dhcp_enum_means_enabled(snapshot):
+    """ConvertTo-Json 把 NetIPInterfaceDhcp 序列化成整数：Disabled=0，Enabled=1。"""
+    snapshot["interfaces"] = [{"InterfaceIndex": 32, "Dhcp": 1}]
+
+    assert by_name(parse_snapshot(snapshot), "Ethernet 10").dhcp is True
+
+
+def test_numeric_dhcp_enum_means_disabled(snapshot):
+    snapshot["interfaces"] = [{"InterfaceIndex": 32, "Dhcp": 0}]
+
+    assert by_name(parse_snapshot(snapshot), "Ethernet 10").dhcp is False
+
+
+def test_unknown_dhcp_value_degrades_to_unknown(snapshot):
+    snapshot["interfaces"][0]["Dhcp"] = "Whatever"
+
+    assert by_name(parse_snapshot(snapshot), "Ethernet 10").dhcp is None
+
+
 # ---------- 活动网卡选择（规格第 7.1 节）----------
 
 def test_active_adapter_is_the_one_with_a_gateway(adapters):

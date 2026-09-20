@@ -62,14 +62,57 @@
     }
   ],
   "addresses": [
-    {"InterfaceIndex": 32, "IPAddress": "172.20.10.7", "PrefixLength": 28},
-    {"InterfaceIndex": 25, "IPAddress": "10.0.0.2", "PrefixLength": 24},
-    {"InterfaceIndex": 23, "IPAddress": "169.254.25.234", "PrefixLength": 16},
-    {"InterfaceIndex": 40, "IPAddress": "172.22.112.1", "PrefixLength": 20},
-    {"InterfaceIndex": 33, "IPAddress": "192.168.137.1", "PrefixLength": 24},
-    {"InterfaceIndex": 8, "IPAddress": "100.111.31.82", "PrefixLength": 32}
+    {
+      "InterfaceIndex": 32,
+      "IPAddress": "172.20.10.7",
+      "PrefixLength": 28
+    },
+    {
+      "InterfaceIndex": 25,
+      "IPAddress": "10.0.0.2",
+      "PrefixLength": 24
+    },
+    {
+      "InterfaceIndex": 23,
+      "IPAddress": "169.254.25.234",
+      "PrefixLength": 16
+    },
+    {
+      "InterfaceIndex": 40,
+      "IPAddress": "172.22.112.1",
+      "PrefixLength": 20
+    },
+    {
+      "InterfaceIndex": 33,
+      "IPAddress": "192.168.137.1",
+      "PrefixLength": 24
+    },
+    {
+      "InterfaceIndex": 8,
+      "IPAddress": "100.111.31.82",
+      "PrefixLength": 32
+    }
   ],
   "routes": [
-    {"InterfaceIndex": 32, "NextHop": "172.20.10.1", "RouteMetric": 0, "InterfaceMetric": 25}
+    {
+      "InterfaceIndex": 32,
+      "NextHop": "172.20.10.1",
+      "RouteMetric": 0,
+      "InterfaceMetric": 25
+    }
+  ],
+  "interfaces": [
+    {
+      "InterfaceIndex": 32,
+      "Dhcp": "Enabled"
+    },
+    {
+      "InterfaceIndex": 25,
+      "Dhcp": "Disabled"
+    },
+    {
+      "InterfaceIndex": 40,
+      "Dhcp": "Disabled"
+    }
   ]
 }

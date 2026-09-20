@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
@@ -15,14 +16,53 @@ from .controller import (
     ScanHitFound,
     ScanRequested,
     ScanResults,
+    SetDhcpRequested,
+    SetStaticIpRequested,
     Shutdown,
     State,
     StateChanged,
+    StaticIpProfilesUpdated,
     SwitchRequested,
     UseHitRequested,
 )
-from .network import Adapter, AdapterKind
+from .network import Adapter, AdapterKind, StaticIpProfile
 from .scanner import ScanHit
+
+STATIC_IP_FIELDS = ("IP 地址", "前缀长度", "网关（可留空）", "DNS（逗号分隔，可留空）")
+
+_DNS_SEPARATORS = re.compile(r"[,\s]+")
+
+
+def parse_static_ip_form(ip: str, prefix: str, gateway: str, dns: str) -> StaticIpProfile:
+    """把弹窗里的四个文本框转成档位。非法值抛 ValueError，由调用方落到日志。"""
+    length = prefix.strip()
+    if not length.isdigit():
+        raise ValueError(f"前缀长度必须是数字，得到 {prefix!r}")
+    servers = tuple(part for part in _DNS_SEPARATORS.split(dns.strip()) if part)
+    return StaticIpProfile(
+        ip=ip.strip(),
+        prefix_length=int(length),
+        gateway=gateway.strip() or None,
+        dns=servers,
+    )
+
+
+def prefill(adapter: Adapter, saved: StaticIpProfile | None) -> tuple[str, str, str, str]:
+    """弹窗初值：优先上次填过的档位，否则照抄网卡当前地址。"""
+    if saved is not None:
+        return (saved.ip, str(saved.prefix_length), saved.gateway or "", ", ".join(saved.dns))
+    return (
+        adapter.ipv4 or "",
+        str(adapter.prefix_length) if adapter.prefix_length is not None else "",
+        adapter.gateway or "",
+        "",
+    )
+
+
+def addressing_mode(adapter: Adapter) -> str:
+    if adapter.dhcp is None:
+        return "-"  # 已禁用的网卡查不到寻址方式
+    return "自动 (DHCP)" if adapter.dhcp else "静态"
 
 
 class Application:
@@ -40,6 +80,7 @@ class Application:
         self._events = ui_events
         self._stop = stop
         self._adapters: dict[int, Adapter] = {}
+        self._profiles: dict[str, StaticIpProfile] = {}
         self._hits: dict[str, ScanHit] = {}
         self._closing = False
 
@@ -61,23 +102,30 @@ class Application:
         adapters_frame.columnconfigure(0, weight=1)
         self._adapters_view = ttk.Treeview(
             adapters_frame,
-            columns=("kind", "name", "description", "status", "ipv4"),
+            columns=("kind", "name", "description", "status", "ipv4", "gateway", "mode"),
             show="headings",
             height=5,
         )
-        headings = (("kind", "类型", 80), ("name", "名称", 150), ("description", "说明", 330),
-                    ("status", "状态", 100), ("ipv4", "IPv4", 150))
+        headings = (("kind", "类型", 70), ("name", "名称", 130), ("description", "说明", 240),
+                    ("status", "状态", 80), ("ipv4", "IPv4", 130), ("gateway", "网关", 130),
+                    ("mode", "寻址方式", 100))
         for key, title, width in headings:
             self._adapters_view.heading(key, text=title)
             self._adapters_view.column(key, width=width, anchor="w")
         self._adapters_view.grid(row=0, column=0, sticky="nsew")
+        self._adapters_view.bind("<<TreeviewSelect>>", lambda _event: self._refresh_ip_buttons())
 
         controls = ttk.Frame(adapters_frame)
         controls.grid(row=1, column=0, pady=(8, 0), sticky="w")
         self._wired_button = ttk.Button(controls, text="切换到有线", command=lambda: self._switch(AdapterKind.WIRED))
         self._wired_button.grid(row=0, column=0, padx=(0, 6))
         self._wireless_button = ttk.Button(controls, text="切换到 Wi-Fi", command=lambda: self._switch(AdapterKind.WIRELESS))
-        self._wireless_button.grid(row=0, column=1)
+        self._wireless_button.grid(row=0, column=1, padx=(0, 18))
+        self._static_button = ttk.Button(controls, text="设为静态 IP", command=self._open_static_ip_dialog)
+        self._static_button.grid(row=0, column=2, padx=(0, 6))
+        self._dhcp_button = ttk.Button(controls, text="设为动态 IP", command=self._set_dhcp)
+        self._dhcp_button.grid(row=0, column=3)
+        self._refresh_ip_buttons()
 
         proxy_frame = ttk.LabelFrame(self._root, text="HTTP Proxy", padding=10)
         proxy_frame.grid(row=1, column=0, padx=12, pady=6, sticky="ew")
@@ -116,6 +164,60 @@ class Application:
         if adapter is not None:
             self._controller.post(SwitchRequested(adapter.index))
 
+    def _selected_adapter(self) -> Adapter | None:
+        selection = self._adapters_view.selection()
+        if not selection:
+            return None
+        return self._adapters.get(int(selection[0]))
+
+    def _refresh_ip_buttons(self) -> None:
+        state = "!disabled" if self._selected_adapter() is not None else "disabled"
+        self._static_button.state((state,))
+        self._dhcp_button.state((state,))
+
+    def _set_dhcp(self) -> None:
+        adapter = self._selected_adapter()
+        if adapter is not None:
+            self._controller.post(SetDhcpRequested(adapter.index))
+
+    def _open_static_ip_dialog(self) -> "tk.Toplevel | None":
+        adapter = self._selected_adapter()
+        if adapter is None:
+            return None
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title(f"设置静态 IP — {adapter.name}")
+        dialog.transient(self._root)
+        dialog.resizable(False, False)
+        # 不调 grab_set：弹窗出错时模态会锁死整个界面
+        dialog.fields = tuple(
+            tk.StringVar(value=value)
+            for value in prefill(adapter, self._profiles.get(adapter.name))
+        )
+        for index, (label, variable) in enumerate(zip(STATIC_IP_FIELDS, dialog.fields)):
+            ttk.Label(dialog, text=label).grid(row=index, column=0, padx=12, pady=6, sticky="w")
+            ttk.Entry(dialog, textvariable=variable, width=32).grid(
+                row=index, column=1, padx=12, pady=6
+            )
+
+        def submit() -> None:
+            self._apply_static_ip(adapter.index, *(field.get() for field in dialog.fields))
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=len(STATIC_IP_FIELDS), column=0, columnspan=2, pady=(6, 12))
+        ttk.Button(buttons, text="应用", command=submit).grid(row=0, column=0, padx=6)
+        ttk.Button(buttons, text="取消", command=dialog.destroy).grid(row=0, column=1, padx=6)
+        return dialog
+
+    def _apply_static_ip(self, index: int, ip: str, prefix: str, gateway: str, dns: str) -> None:
+        try:
+            profile = parse_static_ip_form(ip, prefix, gateway, dns)
+        except ValueError as exc:
+            self._append_log(f"静态 IP 填写有误：{exc}")  # 弹模态框会卡住事件循环
+            return
+        self._controller.post(SetStaticIpRequested(index, profile))
+
     def _use_selected(self) -> None:
         selection = self._results_view.selection()
         if selection:
@@ -135,7 +237,6 @@ class Application:
 
     def _handle(self, event: object) -> None:
         if isinstance(event, AdaptersUpdated):
-            self._adapters = {adapter.index: adapter for adapter in event.adapters}
             self._replace_adapters(event.adapters, event.active_index)
         elif isinstance(event, ScanHitFound):
             self._insert_hit(event.hit)
@@ -146,10 +247,14 @@ class Application:
             self._proxy.set(f"当前代理：{value}    状态：{event.status}")
         elif isinstance(event, StateChanged):
             self._state.set(event.state.value)
+        elif isinstance(event, StaticIpProfilesUpdated):
+            self._profiles = dict(event.profiles)
         elif isinstance(event, LogLine):
             self._append_log(event.text)
 
     def _replace_adapters(self, adapters: tuple[Adapter, ...], active_index: int | None) -> None:
+        self._adapters = {adapter.index: adapter for adapter in adapters}
+        selected = self._adapters_view.selection()
         existing = self._adapters_view.get_children()
         if existing:
             self._adapters_view.delete(*existing)
@@ -157,8 +262,14 @@ class Application:
             marker = "● " if adapter.index == active_index else ""
             self._adapters_view.insert("", "end", iid=str(adapter.index), values=(
                 adapter.kind.value, marker + adapter.name, adapter.description,
-                adapter.status.value, adapter.ipv4 or "-",
+                adapter.status.value, adapter.ipv4 or "-", adapter.gateway or "-",
+                addressing_mode(adapter),
             ))
+        # 每轮扫描都会重建表格，不能把用户选中的行弄丢
+        alive = [iid for iid in selected if self._adapters_view.exists(iid)]
+        if alive:
+            self._adapters_view.selection_set(alive)
+        self._refresh_ip_buttons()
         self._wired_button.state(("!disabled" if any(a.kind is AdapterKind.WIRED for a in adapters) else "disabled",))
         self._wireless_button.state(("!disabled" if any(a.kind is AdapterKind.WIRELESS for a in adapters) else "disabled",))
 

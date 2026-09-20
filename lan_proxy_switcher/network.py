@@ -26,7 +26,10 @@ QUERY_SCRIPT = (
     "Select-Object InterfaceIndex,IPAddress,PrefixLength; "
     "$routes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
     "Select-Object InterfaceIndex,NextHop,RouteMetric,InterfaceMetric; "
-    "[pscustomobject]@{adapters=@($adapters); addresses=@($addresses); routes=@($routes)} | "
+    "$interfaces = Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+    "Select-Object InterfaceIndex,Dhcp; "
+    "[pscustomobject]@{adapters=@($adapters); addresses=@($addresses); routes=@($routes); "
+    "interfaces=@($interfaces)} | "
     "ConvertTo-Json -Depth 4 -Compress"
 )
 
@@ -64,12 +67,46 @@ class Adapter:
     prefix_length: int | None
     gateway: str | None
     metric: int | None
+    dhcp: bool | None = None  # None：网卡已禁用，Get-NetIPInterface 里查不到
+
+
+def _ipv4(value: object, label: str) -> str:
+    """校验后原样返回。值会拼进 PowerShell 命令串，这里是唯一的防线。"""
+    if not isinstance(value, str):
+        raise ValueError(f"{label}必须是字符串，得到 {value!r}")
+    try:
+        return str(ipaddress.IPv4Address(value.strip()))
+    except ipaddress.AddressValueError as exc:
+        raise ValueError(f"{label}不是合法的 IPv4 地址：{value!r}") from exc
+
+
+@dataclass(frozen=True)
+class StaticIpProfile:
+    """一张网卡的静态 IP 档位。构造即校验，之后可以放心拼进命令串。"""
+
+    ip: str
+    prefix_length: int
+    gateway: str | None
+    dns: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ip", _ipv4(self.ip, "IP 地址"))
+        prefix = self.prefix_length
+        if isinstance(prefix, bool) or not isinstance(prefix, int) or not 1 <= prefix <= 32:
+            raise ValueError(f"前缀长度必须是 1~32 之间的整数，得到 {prefix!r}")
+        if self.gateway is not None:
+            object.__setattr__(self, "gateway", _ipv4(self.gateway, "网关"))
+        object.__setattr__(self, "dns", tuple(_ipv4(item, "DNS") for item in self.dns))
 
 
 class NetworkService(Protocol):
     def list_adapters(self) -> list[Adapter]: ...
 
     def set_adapter_enabled(self, index: int, enabled: bool) -> None: ...
+
+    def set_static_ip(self, index: int, profile: StaticIpProfile) -> None: ...
+
+    def set_dhcp(self, index: int) -> None: ...
 
 
 def run_powershell(script: str, timeout: float = 30.0) -> str:
@@ -131,6 +168,19 @@ def _default_route(rows: Sequence[dict]) -> tuple[str | None, int | None]:
     return best if best is not None else (None, None)
 
 
+def _dhcp(row: dict) -> bool | None:
+    """ConvertTo-Json 把 NetIPInterfaceDhcp 序列化成整数（Disabled=0、Enabled=1），
+    但不同 PowerShell 版本也可能给出枚举名，两种都接。"""
+    raw = row.get("Dhcp")
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int):
+        return {0: False, 1: True}.get(raw)
+    if isinstance(raw, str):
+        return {"disabled": False, "enabled": True}.get(raw.strip().lower())
+    return None
+
+
 def parse_snapshot(payload: dict) -> list[Adapter]:
     """把 QUERY_SCRIPT 的 JSON 输出解析成 Adapter 列表，只保留物理网卡。"""
     addresses: dict[int, list[dict]] = {}
@@ -140,6 +190,10 @@ def parse_snapshot(payload: dict) -> list[Adapter]:
     routes: dict[int, list[dict]] = {}
     for row in payload.get("routes") or []:
         routes.setdefault(int(row["InterfaceIndex"]), []).append(row)
+
+    dhcp: dict[int, bool | None] = {}
+    for row in payload.get("interfaces") or []:
+        dhcp[int(row["InterfaceIndex"])] = _dhcp(row)
 
     adapters: list[Adapter] = []
     for row in payload.get("adapters") or []:
@@ -159,6 +213,7 @@ def parse_snapshot(payload: dict) -> list[Adapter]:
                 prefix_length=prefix_length,
                 gateway=gateway,
                 metric=metric,
+                dhcp=dhcp.get(index),
             )
         )
     return adapters
@@ -178,6 +233,13 @@ def current_identity() -> str:
     return run_powershell(IDENTITY_SCRIPT).strip()
 
 
+def _interface_index(index: object) -> int:
+    """索引直接拼进命令串，必须是整数。bool 是 int 的子类，显式挡掉。"""
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise TypeError(f"InterfaceIndex 必须是整数，得到 {index!r}")
+    return int(index)
+
+
 def switch_script(index: int, enabled: bool) -> str:
     """按 InterfaceIndex 找到网卡对象，再启用/禁用。
 
@@ -185,12 +247,58 @@ def switch_script(index: int, enabled: bool) -> str:
     Get-NetAdapter 支持的参数直接传给它们。使用 InputObject 既保留索引这一稳定
     身份，也避免把显示名称拼接进 PowerShell 命令。
     """
-    if isinstance(index, bool) or not isinstance(index, int):
-        raise TypeError(f"InterfaceIndex 必须是整数，得到 {index!r}")
+    _interface_index(index)
     verb = "Enable-NetAdapter" if enabled else "Disable-NetAdapter"
     return (
         f"$adapter = Get-NetAdapter -InterfaceIndex {int(index)} -IncludeHidden -ErrorAction Stop; "
         f"{verb} -InputObject $adapter -Confirm:$false -ErrorAction Stop"
+    )
+
+
+def _clear_ip_script(index: int) -> str:
+    """改寻址方式前先清干净：本来就没有静态地址时 Remove-* 会报错，故容错。"""
+    return (
+        f"Get-NetAdapter -InterfaceIndex {index} -ErrorAction Stop | Out-Null; "
+        f"Remove-NetIPAddress -InterfaceIndex {index} -AddressFamily IPv4 "
+        "-Confirm:$false -ErrorAction SilentlyContinue; "
+        f"Remove-NetRoute -InterfaceIndex {index} -AddressFamily IPv4 "
+        "-DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue; "
+    )
+
+
+def _dns_script(index: int, dns: Sequence[str]) -> str:
+    if dns:
+        servers = ",".join(f"'{server}'" for server in dns)
+        return (
+            f"Set-DnsClientServerAddress -InterfaceIndex {index} "
+            f"-ServerAddresses @({servers}) -ErrorAction Stop"
+        )
+    # 静态 DNS 不随地址一起消失，必须显式恢复自动获取
+    return f"Set-DnsClientServerAddress -InterfaceIndex {index} -ResetServerAddresses -ErrorAction Stop"
+
+
+def static_ip_script(index: int, profile: StaticIpProfile) -> str:
+    """DHCP 仍开着时 New-NetIPAddress 会失败，所以先 -Dhcp Disabled。"""
+    idx = _interface_index(index)
+    gateway = f" -DefaultGateway '{profile.gateway}'" if profile.gateway else ""
+    return (
+        _clear_ip_script(idx)
+        + f"Set-NetIPInterface -InterfaceIndex {idx} -AddressFamily IPv4 "
+        "-Dhcp Disabled -ErrorAction Stop; "
+        + f"New-NetIPAddress -InterfaceIndex {idx} -AddressFamily IPv4 "
+        f"-IPAddress '{profile.ip}' -PrefixLength {profile.prefix_length}{gateway} "
+        "-ErrorAction Stop | Out-Null; "
+        + _dns_script(idx, profile.dns)
+    )
+
+
+def dhcp_script(index: int) -> str:
+    idx = _interface_index(index)
+    return (
+        _clear_ip_script(idx)
+        + f"Set-NetIPInterface -InterfaceIndex {idx} -AddressFamily IPv4 "
+        "-Dhcp Enabled -ErrorAction Stop; "
+        + _dns_script(idx, ())
     )
 
 
@@ -207,3 +315,9 @@ class PowerShellNetworkService:
 
     def set_adapter_enabled(self, index: int, enabled: bool) -> None:
         run_powershell(switch_script(index, enabled), timeout=60.0)
+
+    def set_static_ip(self, index: int, profile: StaticIpProfile) -> None:
+        run_powershell(static_ip_script(index, profile), timeout=60.0)
+
+    def set_dhcp(self, index: int) -> None:
+        run_powershell(dhcp_script(index), timeout=60.0)

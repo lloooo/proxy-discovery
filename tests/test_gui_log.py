@@ -18,15 +18,12 @@ class FakeController:
 
 
 @pytest.fixture
-def app():
-    try:
-        root = tk.Tk()
-    except tk.TclError as exc:  # 无显示环境
-        pytest.skip(f"Tk 不可用：{exc}")
-    root.withdraw()
-    application = Application(root, FakeController(), queue.Queue(), lambda: None)
+def app(tk_root):
+    for child in tk_root.winfo_children():
+        child.destroy()
+    application = Application(tk_root, FakeController(), queue.Queue(), lambda: None)
     yield application
-    application.close()
+    application._closing = True  # 停掉 after 轮询，但把 root 留给下一个用例
 
 
 def log_text(application):

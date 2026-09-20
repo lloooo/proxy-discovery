@@ -9,14 +9,20 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable
 
 from . import scanner
 from .config import Config
 from .monitor import MonitorError, NetworkChanged, ProxyLost, ProxyOk
-from .network import Adapter, AdapterStatus, current_identity, select_active
+from .network import (
+    Adapter,
+    AdapterStatus,
+    StaticIpProfile,
+    current_identity,
+    select_active,
+)
 from .proxy import ProxyState
 from .scanner import DiscoveryResult, ScanHit
 
@@ -80,6 +86,27 @@ class SwitchRequested:
 
 
 @dataclass(frozen=True)
+class SetStaticIpRequested:
+    adapter_index: int
+    profile: StaticIpProfile
+
+
+@dataclass(frozen=True)
+class SetDhcpRequested:
+    adapter_index: int
+
+
+@dataclass(frozen=True)
+class IpConfigFinished:
+    ok: bool
+    message: str
+    adapter_index: int
+    token: object
+    # 档位只在成功后落盘，且必须由状态机线程写，不能由 worker 写
+    remember: tuple[str, StaticIpProfile] | None = None
+
+
+@dataclass(frozen=True)
 class SwitchFinished:
     ok: bool
     message: str
@@ -117,6 +144,11 @@ class ProxyStatus:
 
 
 @dataclass(frozen=True)
+class StaticIpProfilesUpdated:
+    profiles: dict[str, StaticIpProfile]
+
+
+@dataclass(frozen=True)
 class StateChanged:
     state: State
 
@@ -124,6 +156,7 @@ class StateChanged:
 class Controller:
     DISABLE_TIMEOUT_S = 15.0
     ENABLE_TIMEOUT_S = 30.0
+    IP_CONFIG_TIMEOUT_S = 30.0
 
     def __init__(
         self,
@@ -139,6 +172,7 @@ class Controller:
         scan=scanner.scan,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        save_config: Callable[[Config], None] = lambda _cfg: None,
     ) -> None:
         self._cfg = cfg
         self._network = network
@@ -151,6 +185,7 @@ class Controller:
         self._scan = scan
         self._sleep = sleep
         self._clock = clock
+        self._save_config = save_config
 
         self.inbox: "queue.Queue[object]" = queue.Queue()
         self.state = State.IDLE
@@ -174,6 +209,9 @@ class Controller:
             Shutdown: self._on_shutdown,
             SwitchRequested: self._on_switch_requested,
             SwitchFinished: self._on_switch_finished,
+            SetStaticIpRequested: self._on_set_static_ip,
+            SetDhcpRequested: self._on_set_dhcp,
+            IpConfigFinished: self._on_ip_config_finished,
             NetworkChanged: self._on_network_changed,
             ProxyOk: self._on_proxy_ok,
             ProxyLost: self._on_proxy_lost,
@@ -221,6 +259,9 @@ class Controller:
         self.state = state
         self._ui.put(StateChanged(state))
 
+    def _publish_profiles(self) -> None:
+        self._ui.put(StaticIpProfilesUpdated(dict(self._cfg.static_ip_profiles)))
+
     def _publish_adapters(self) -> list[Adapter]:
         self.adapters = tuple(self._network.list_adapters())
         active = select_active(self.adapters)
@@ -239,6 +280,16 @@ class Controller:
         self._log(f"设置 Windows 系统代理成功，已校验：{server}")
         self._ui.put(ProxyStatus(server, "TCP 连接正常"))
         self._set_state(State.PROXY_ACTIVE)
+
+    def _wait_for(self, predicate: Callable[[list[Adapter]], bool], timeout: float) -> bool:
+        """在 worker 线程里轮询网卡快照，直到条件成立或超时。"""
+        deadline = self._clock() + timeout
+        while True:
+            if predicate(list(self._network.list_adapters())):
+                return True
+            if self._clock() >= deadline:
+                return False
+            self._sleep(0.5)
 
     def _turn_proxy_off(self) -> None:
         self._proxy.disable()
@@ -262,6 +313,7 @@ class Controller:
         else:
             self._log("启动前系统代理：未启用")
 
+        self._publish_profiles()
         self._publish_adapters()
         if self._cfg.auto_scan:
             self._begin_scan(None)
@@ -378,15 +430,7 @@ class Controller:
         self._set_state(State.SWITCHING)
         self._log(f"开始切换到：{target.name}")
 
-        def wait_for(predicate: Callable[[list[Adapter]], bool], timeout: float) -> bool:
-            deadline = self._clock() + timeout
-            while True:
-                adapters_now = list(self._network.list_adapters())
-                if predicate(adapters_now):
-                    return True
-                if self._clock() >= deadline:
-                    return False
-                self._sleep(0.5)
+        wait_for = self._wait_for
 
         def job() -> None:
             try:
@@ -437,6 +481,115 @@ class Controller:
             self._set_state(State.NO_PROXY)
             return
         self._begin_scan(message.adapter_index)
+
+
+    # ---------- 静态 / 动态 IP ----------
+
+    def _prepare_ip_config(self, adapter_index: int) -> Adapter | None:
+        self._cancel_scan()
+        adapters = self._publish_adapters()
+        target = next((a for a in adapters if a.index == adapter_index), None)
+        if target is None:
+            self._log(f"找不到 InterfaceIndex={adapter_index} 的网卡")
+            self._set_state(State.NO_PROXY)
+        return target
+
+    def _run_ip_config(
+        self,
+        target: Adapter,
+        apply: Callable[[], None],
+        success: str,
+        failure: str,
+        remember: tuple[str, StaticIpProfile] | None = None,
+    ) -> None:
+        """与网卡切换共用 _switch_token：两者都独占网卡，后来者作废前者。"""
+        token = object()
+        self._switch_token = token
+        self._set_state(State.SWITCHING)
+
+        def job() -> None:
+            try:
+                apply()
+            except Exception as exc:
+                self.post(IpConfigFinished(False, f"{failure}：{exc}", target.index, token))
+            else:
+                self.post(IpConfigFinished(True, success, target.index, token, remember))
+
+        self._spawn(job)
+
+    def _on_set_static_ip(self, message: SetStaticIpRequested) -> None:
+        target = self._prepare_ip_config(message.adapter_index)
+        if target is None:
+            return
+
+        profile = message.profile
+        address = f"{profile.ip}/{profile.prefix_length}"
+        self._log(f"正在为 {target.name} 设置静态 IP：{address}")
+
+        def apply() -> None:
+            self._network.set_static_ip(target.index, profile)
+            ready = self._wait_for(
+                lambda current: any(
+                    item.index == target.index and item.ipv4 == profile.ip for item in current
+                ),
+                self.IP_CONFIG_TIMEOUT_S,
+            )
+            if not ready:
+                raise TimeoutError(f"等待 {target.name} 应用 {address} 超时")
+
+        self._run_ip_config(
+            target,
+            apply,
+            f"已为 {target.name} 设置静态 IP：{address}",
+            "设置静态 IP 失败",
+            remember=(target.name, profile),
+        )
+
+    def _on_set_dhcp(self, message: SetDhcpRequested) -> None:
+        target = self._prepare_ip_config(message.adapter_index)
+        if target is None:
+            return
+
+        self._log(f"正在把 {target.name} 切回自动获取（DHCP）")
+
+        def apply() -> None:
+            self._network.set_dhcp(target.index)
+            ready = self._wait_for(
+                lambda current: any(
+                    item.index == target.index and item.ipv4 is not None for item in current
+                ),
+                self.IP_CONFIG_TIMEOUT_S,
+            )
+            if not ready:
+                raise TimeoutError(f"等待 {target.name} 取得 DHCP 地址超时")
+
+        self._run_ip_config(
+            target,
+            apply,
+            f"已把 {target.name} 切回自动获取（DHCP）",
+            "切换到动态 IP 失败",
+        )
+
+    def _on_ip_config_finished(self, message: IpConfigFinished) -> None:
+        if message.token is not self._switch_token:
+            return
+        self._switch_token = None
+
+        if message.ok and message.remember is not None:
+            name, profile = message.remember
+            self._cfg = replace(
+                self._cfg,
+                static_ip_profiles={**self._cfg.static_ip_profiles, name: profile},
+            )
+            self._save_config(self._cfg)
+            self._publish_profiles()
+
+        self._publish_adapters()
+        self._log(message.message)
+        if not message.ok:
+            self._set_state(State.NO_PROXY)
+            return
+        self._begin_scan(message.adapter_index)  # 网段变了，旧的扫描结果作废
 
     def _on_network_changed(self, _message: NetworkChanged) -> None:
         if self.state is State.SWITCHING:
