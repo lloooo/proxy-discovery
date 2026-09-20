@@ -107,6 +107,9 @@ class Application:
         self._log.configure(yscrollcommand=scroll.set)
         self._log.grid(row=0, column=0, sticky="nsew")
         scroll.grid(row=0, column=1, sticky="ns")
+        log_controls = ttk.Frame(log_frame)
+        log_controls.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="w")
+        ttk.Button(log_controls, text="清空日志", command=self._clear_log).grid(row=0, column=0)
 
     def _switch(self, kind: AdapterKind) -> None:
         adapter = next((item for item in self._adapters.values() if item.kind is kind), None)
@@ -180,6 +183,11 @@ class Application:
         self._log.configure(state="normal")
         self._log.insert("end", line + "\n")
         self._log.see("end")
+        self._log.configure(state="disabled")
+
+    def _clear_log(self) -> None:
+        self._log.configure(state="normal")
+        self._log.delete("1.0", "end")
         self._log.configure(state="disabled")
 
     def close(self) -> None:
