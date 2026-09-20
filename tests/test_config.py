@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from lan_proxy_switcher import config, network
 
 
@@ -150,3 +152,86 @@ def test_static_ip_profiles_of_the_wrong_shape_fall_back_to_empty(tmp_path):
 
     assert cfg.static_ip_profiles == {}
     assert any("staticIpProfiles" in line for line in lines)
+
+
+# ---------- 设置表单 ----------
+
+# 默认配置对应的表单内容，个别用例只改其中一项
+FORM = {
+    "ports": "7890, 1082",
+    "prefer_port": "7890",
+    "scan_timeout_ms": "500",
+    "scan_concurrency": "100",
+    "monitor_interval_s": "30",
+    "proxy_check_failures": "3",
+    "auto_scan": True,
+    "auto_set_proxy": True,
+    "disable_proxy_when_unavailable": False,
+    "restore_proxy_on_exit": False,
+}
+
+
+def test_ports_field_accepts_comma_and_space_separated_values():
+    assert config.parse_ports_field(" 7890 , 1082 ") == (7890, 1082)
+    assert config.parse_ports_field("7890 1082") == (7890, 1082)
+
+
+def test_empty_ports_field_is_rejected():
+    with pytest.raises(ValueError, match="扫描端口"):
+        config.parse_ports_field("   ")
+
+
+def test_non_numeric_port_is_rejected():
+    with pytest.raises(ValueError, match="扫描端口"):
+        config.parse_ports_field("7890, http")
+
+
+def test_apply_form_builds_a_config_from_text_and_flags():
+    updated = config.apply_form(config.Config(), {
+        "ports": "1082, 7890",
+        "prefer_port": "1082",
+        "scan_timeout_ms": "800",
+        "scan_concurrency": "64",
+        "monitor_interval_s": "15",
+        "proxy_check_failures": "5",
+        "auto_scan": False,
+        "auto_set_proxy": True,
+        "disable_proxy_when_unavailable": True,
+        "restore_proxy_on_exit": False,
+    })
+
+    assert updated.ports == (1082, 7890)
+    assert updated.prefer_port == 1082
+    assert updated.scan_timeout_ms == 800
+    assert updated.scan_concurrency == 64
+    assert updated.monitor_interval_s == 15
+    assert updated.proxy_check_failures == 5
+    assert updated.auto_scan is False
+    assert updated.disable_proxy_when_unavailable is True
+
+
+def test_apply_form_keeps_static_ip_profiles_untouched():
+    """档位由 IP 弹窗维护，设置表单不该碰它。"""
+    base = config.Config(static_ip_profiles={
+        "Wi-Fi": network.StaticIpProfile("192.168.1.50", 24, None, ())
+    })
+
+    updated = config.apply_form(base, dict(FORM, scan_timeout_ms="900"))
+
+    assert updated.static_ip_profiles == base.static_ip_profiles
+
+
+def test_apply_form_reports_the_chinese_field_name_on_a_bad_int():
+    with pytest.raises(ValueError, match="TCP 超时"):
+        config.apply_form(config.Config(), dict(FORM, scan_timeout_ms="abc"))
+
+
+def test_apply_form_rejects_an_int_outside_its_range():
+    with pytest.raises(ValueError, match="并发数"):
+        config.apply_form(config.Config(), dict(FORM, scan_concurrency="0"))
+
+
+def test_apply_form_rejects_a_prefer_port_missing_from_ports():
+    """load() 会静默改写，表单必须报错——用户正盯着这两个框。"""
+    with pytest.raises(ValueError, match="首选端口"):
+        config.apply_form(config.Config(), dict(FORM, ports="1082", prefer_port="7890"))

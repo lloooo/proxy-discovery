@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import re
+import subprocess
+import sys
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk
 from typing import Callable
 
+from .config import (
+    FORM_FLAGS,
+    FORM_INTS,
+    PORTS_LABEL,
+    Config,
+    apply_form,
+    config_path,
+    ports_field,
+)
 from .controller import (
     AdaptersUpdated,
+    ConfigLoaded,
+    ConfigUpdated,
     DisableProxyRequested,
     LogLine,
     ProxyStatus,
@@ -31,6 +46,14 @@ from .scanner import ScanHit
 STATIC_IP_FIELDS = ("IP 地址", "前缀长度", "网关（可留空）", "DNS（逗号分隔，可留空）")
 
 _DNS_SEPARATORS = re.compile(r"[,\s]+")
+
+
+def reveal_in_explorer(folder: Path) -> None:
+    """在文件管理器里打开配置文件所在目录。非 Windows 下退化为 xdg-open。"""
+    if sys.platform == "win32":
+        os.startfile(folder)  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(folder)])
 
 
 def parse_static_ip_form(ip: str, prefix: str, gateway: str, dns: str) -> StaticIpProfile:
@@ -74,11 +97,18 @@ class Application:
         controller,
         ui_events: "queue.Queue[object]",
         stop: Callable[[], None],
+        *,
+        config_file: Path | None = None,
+        reveal: Callable[[Path], None] = reveal_in_explorer,
     ) -> None:
         self._root = root
         self._controller = controller
         self._events = ui_events
         self._stop = stop
+        self._config_file = config_file if config_file is not None else config_path()
+        self._reveal = reveal
+        # 控制器 Start 时会投来 ConfigLoaded；在那之前没有可预填的配置
+        self._cfg: Config | None = None
         self._adapters: dict[int, Adapter] = {}
         self._profiles: dict[str, StaticIpProfile] = {}
         self._hits: dict[str, ScanHit] = {}
@@ -95,10 +125,16 @@ class Application:
         self._root.geometry("1000x720")
         self._root.minsize(760, 560)
         self._root.columnconfigure(0, weight=1)
-        self._root.rowconfigure(3, weight=1)
+        self._root.rowconfigure(4, weight=1)
+
+        toolbar = ttk.Frame(self._root)
+        toolbar.grid(row=0, column=0, padx=12, pady=(12, 0), sticky="ew")
+        toolbar.columnconfigure(0, weight=1)
+        self._settings_button = ttk.Button(toolbar, text="设置", command=self._open_settings_dialog)
+        self._settings_button.grid(row=0, column=1, sticky="e")
 
         adapters_frame = ttk.LabelFrame(self._root, text="网络适配器", padding=10)
-        adapters_frame.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="nsew")
+        adapters_frame.grid(row=1, column=0, padx=12, pady=(6, 6), sticky="nsew")
         adapters_frame.columnconfigure(0, weight=1)
         self._adapters_view = ttk.Treeview(
             adapters_frame,
@@ -128,7 +164,7 @@ class Application:
         self._refresh_ip_buttons()
 
         proxy_frame = ttk.LabelFrame(self._root, text="HTTP Proxy", padding=10)
-        proxy_frame.grid(row=1, column=0, padx=12, pady=6, sticky="ew")
+        proxy_frame.grid(row=2, column=0, padx=12, pady=6, sticky="ew")
         proxy_frame.columnconfigure(0, weight=1)
         ttk.Label(proxy_frame, textvariable=self._proxy).grid(row=0, column=0, sticky="w")
         ttk.Label(proxy_frame, textvariable=self._state).grid(row=0, column=1, sticky="e")
@@ -139,7 +175,7 @@ class Application:
         ttk.Button(proxy_controls, text="关闭代理", command=lambda: self._controller.post(DisableProxyRequested())).grid(row=0, column=2)
 
         results_frame = ttk.LabelFrame(self._root, text="扫描结果", padding=10)
-        results_frame.grid(row=2, column=0, padx=12, pady=6, sticky="ew")
+        results_frame.grid(row=3, column=0, padx=12, pady=6, sticky="ew")
         self._results_view = ttk.Treeview(results_frame, columns=("ip", "port", "latency"), show="headings", height=6)
         for key, title, width in (("ip", "IP", 250), ("port", "端口", 120), ("latency", "TCP Connect", 160)):
             self._results_view.heading(key, text=title)
@@ -147,7 +183,7 @@ class Application:
         self._results_view.pack(fill="x")
 
         log_frame = ttk.LabelFrame(self._root, text="日志", padding=10)
-        log_frame.grid(row=3, column=0, padx=12, pady=(6, 12), sticky="nsew")
+        log_frame.grid(row=4, column=0, padx=12, pady=(6, 12), sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self._log = tk.Text(log_frame, height=10, state="disabled", wrap="word")
@@ -218,6 +254,80 @@ class Application:
             return
         self._controller.post(SetStaticIpRequested(index, profile))
 
+    # ---------- 设置 ----------
+
+    def _reveal_config_folder(self) -> None:
+        try:
+            self._reveal(self._config_file.parent)
+        except OSError as exc:
+            self._append_log(f"打开配置目录失败：{exc}")
+
+    def _open_settings_dialog(self) -> "tk.Toplevel | None":
+        if self._cfg is None:
+            return None  # ConfigLoaded 还没到，没有可预填的值
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("设置")
+        dialog.transient(self._root)
+        dialog.resizable(False, False)
+        # 与静态 IP 弹窗一样不调 grab_set：弹窗出错时模态会锁死整个界面
+        dialog.fields = {
+            "ports": tk.StringVar(value=ports_field(self._cfg)),
+            **{name: tk.StringVar(value=str(getattr(self._cfg, name))) for name, _ in FORM_INTS},
+            **{name: tk.BooleanVar(value=getattr(self._cfg, name)) for name, _ in FORM_FLAGS},
+        }
+        dialog.error = tk.StringVar(value="")
+        dialog.path_text = str(self._config_file)
+
+        row = 0
+        for name, label in ((("ports", PORTS_LABEL),) + FORM_INTS):
+            ttk.Label(dialog, text=label).grid(row=row, column=0, padx=12, pady=5, sticky="w")
+            ttk.Entry(dialog, textvariable=dialog.fields[name], width=28).grid(
+                row=row, column=1, padx=12, pady=5, sticky="w"
+            )
+            row += 1
+
+        for name, label in FORM_FLAGS:
+            ttk.Checkbutton(dialog, text=label, variable=dialog.fields[name]).grid(
+                row=row, column=0, columnspan=2, padx=12, pady=3, sticky="w"
+            )
+            row += 1
+
+        ttk.Separator(dialog, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, padx=12, pady=(10, 6), sticky="ew"
+        )
+        row += 1
+        ttk.Label(dialog, text=f"配置文件：{dialog.path_text}", wraplength=380).grid(
+            row=row, column=0, columnspan=2, padx=12, sticky="w"
+        )
+        row += 1
+        ttk.Button(dialog, text="打开所在目录", command=self._reveal_config_folder).grid(
+            row=row, column=0, padx=12, pady=(4, 0), sticky="w"
+        )
+        row += 1
+        ttk.Label(dialog, textvariable=dialog.error, foreground="red", wraplength=380).grid(
+            row=row, column=0, columnspan=2, padx=12, pady=(8, 0), sticky="w"
+        )
+        row += 1
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=row, column=0, columnspan=2, pady=(10, 12))
+        ttk.Button(buttons, text="保存", command=lambda: self._save_settings(dialog)).grid(row=0, column=0, padx=6)
+        ttk.Button(buttons, text="取消", command=dialog.destroy).grid(row=0, column=1, padx=6)
+        return dialog
+
+    def _save_settings(self, dialog: "tk.Toplevel") -> None:
+        try:
+            updated = apply_form(
+                self._cfg, {name: var.get() for name, var in dialog.fields.items()}
+            )
+        except ValueError as exc:
+            dialog.error.set(str(exc))  # 弹窗还挡着日志区，错误就地显示
+            return
+        dialog.error.set("")
+        self._controller.post(ConfigUpdated(updated))
+        dialog.destroy()
+
     def _use_selected(self) -> None:
         selection = self._results_view.selection()
         if selection:
@@ -247,6 +357,8 @@ class Application:
             self._proxy.set(f"当前代理：{value}    状态：{event.status}")
         elif isinstance(event, StateChanged):
             self._state.set(event.state.value)
+        elif isinstance(event, ConfigLoaded):
+            self._cfg = event.cfg
         elif isinstance(event, StaticIpProfilesUpdated):
             self._profiles = dict(event.profiles)
         elif isinstance(event, LogLine):

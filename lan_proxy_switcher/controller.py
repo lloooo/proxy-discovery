@@ -76,6 +76,12 @@ class RefreshAdaptersRequested:
 
 
 @dataclass(frozen=True)
+class ConfigUpdated:
+    """设置弹窗保存。staticIpProfiles 以控制器手上的为准，见 _on_config_updated。"""
+    cfg: Config
+
+
+@dataclass(frozen=True)
 class Shutdown:
     pass
 
@@ -149,6 +155,11 @@ class StaticIpProfilesUpdated:
 
 
 @dataclass(frozen=True)
+class ConfigLoaded:
+    cfg: Config
+
+
+@dataclass(frozen=True)
 class StateChanged:
     state: State
 
@@ -206,6 +217,7 @@ class Controller:
             UseHitRequested: self._on_use_hit,
             DisableProxyRequested: self._on_disable_proxy,
             RefreshAdaptersRequested: self._on_refresh,
+            ConfigUpdated: self._on_config_updated,
             Shutdown: self._on_shutdown,
             SwitchRequested: self._on_switch_requested,
             SwitchFinished: self._on_switch_finished,
@@ -258,6 +270,9 @@ class Controller:
     def _set_state(self, state: State) -> None:
         self.state = state
         self._ui.put(StateChanged(state))
+
+    def _publish_config(self) -> None:
+        self._ui.put(ConfigLoaded(self._cfg))
 
     def _publish_profiles(self) -> None:
         self._ui.put(StaticIpProfilesUpdated(dict(self._cfg.static_ip_profiles)))
@@ -313,6 +328,7 @@ class Controller:
         else:
             self._log("启动前系统代理：未启用")
 
+        self._publish_config()
         self._publish_profiles()
         self._publish_adapters()
         if self._cfg.auto_scan:
@@ -414,6 +430,20 @@ class Controller:
 
     def _on_refresh(self, _message: object) -> None:
         self._publish_adapters()
+
+    def _on_config_updated(self, message: ConfigUpdated) -> None:
+        # 弹窗拿的是打开那一刻的快照，档位可能在这期间被 IP 弹窗写过
+        self._cfg = replace(
+            message.cfg, static_ip_profiles=self._cfg.static_ip_profiles
+        )
+        self._save_config(self._cfg)
+        self.monitor.update(
+            monitor_interval_s=self._cfg.monitor_interval_s,
+            scan_timeout_ms=self._cfg.scan_timeout_ms,
+            proxy_check_failures=self._cfg.proxy_check_failures,
+        )
+        self._publish_config()
+        self._log("配置已保存并生效")
 
     def _on_switch_requested(self, message: SwitchRequested) -> None:
         """在工作线程中完成网卡切换，主状态机始终不阻塞。"""

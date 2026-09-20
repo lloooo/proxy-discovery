@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -124,6 +125,79 @@ VALIDATORS: dict[str, Callable[[object], object]] = {
     "disable_proxy_when_unavailable": _flag,
     "restore_proxy_on_exit": _flag,
 }
+
+
+# ---------- 设置表单 ----------
+
+# 表单字段顺序即弹窗里的控件顺序；标签同时用于出错时的提示文案
+PORTS_LABEL = "扫描端口"
+FORM_INTS: tuple[tuple[str, str], ...] = (
+    ("prefer_port", "首选端口"),
+    ("scan_timeout_ms", "TCP 超时(ms)"),
+    ("scan_concurrency", "并发数"),
+    ("monitor_interval_s", "监控间隔(s)"),
+    ("proxy_check_failures", "代理失败阈值"),
+)
+FORM_FLAGS: tuple[tuple[str, str], ...] = (
+    ("auto_scan", "启动时自动扫描"),
+    ("auto_set_proxy", "自动设置系统代理"),
+    ("disable_proxy_when_unavailable", "无可用代理时关闭系统代理"),
+    ("restore_proxy_on_exit", "退出时还原原有代理"),
+)
+
+_PORT_SEPARATORS = re.compile(r"[,\s]+")
+
+
+def parse_ports_field(text: str) -> tuple[int, ...]:
+    """把 "7890, 1082" 这样的一行文本转成端口元组。"""
+    parts = [part for part in _PORT_SEPARATORS.split(text.strip()) if part]
+    if not parts:
+        raise ValueError(f"{PORTS_LABEL}不能为空")
+    for part in parts:
+        if not part.isdigit():
+            raise ValueError(f"{PORTS_LABEL}必须是数字，得到 {part!r}")
+    try:
+        return _ports([int(part) for part in parts])
+    except ValueError as exc:
+        raise ValueError(f"{PORTS_LABEL}：{exc}") from None
+
+
+def _form_int(field: str, label: str, raw: object) -> int:
+    text = str(raw).strip()
+    try:
+        value = int(text)
+    except ValueError:
+        raise ValueError(f"{label}必须是整数，得到 {text!r}") from None
+    try:
+        return VALIDATORS[field](value)  # type: ignore[return-value]
+    except ValueError as exc:
+        raise ValueError(f"{label}{exc}") from None
+
+
+def ports_field(cfg: Config) -> str:
+    return ", ".join(str(port) for port in cfg.ports)
+
+
+def apply_form(base: Config, values: dict[str, object]) -> Config:
+    """把设置弹窗的输入合成新配置。任何一项非法都抛 ValueError，整体不生效。
+
+    staticIpProfiles 不在表单里，原样保留。
+    """
+    changes: dict[str, object] = {"ports": parse_ports_field(str(values["ports"]))}
+    for field_name, label in FORM_INTS:
+        changes[field_name] = _form_int(field_name, label, values[field_name])
+    for field_name, label in FORM_FLAGS:
+        try:
+            changes[field_name] = _flag(values[field_name])
+        except ValueError as exc:
+            raise ValueError(f"{label}{exc}") from None
+
+    prefer = changes["prefer_port"]
+    ports = changes["ports"]
+    if prefer not in ports:  # type: ignore[operator]
+        raise ValueError(f"首选端口 {prefer} 不在{PORTS_LABEL} {list(ports)} 中")  # type: ignore[arg-type]
+
+    return replace(base, **changes)  # type: ignore[arg-type]
 
 
 def config_path() -> Path:

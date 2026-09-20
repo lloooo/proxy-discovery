@@ -220,3 +220,42 @@ def test_thread_survives_a_tick_exception():
 
     assert isinstance(event, MonitorError)
     assert "tick 炸了" in event.message
+
+
+# ---------- 配置热更新 ----------
+
+def test_update_shortens_the_proxy_check_interval():
+    state = build(probe=hit_probe(), monitor_interval_s=30, network_poll_interval_s=1e9)
+    state.set_proxy("10.0.0.1:7890")
+    state.tick(0.0)  # 按旧间隔排到 t=30
+
+    state.update(monitor_interval_s=5, scan_timeout_ms=500, proxy_check_failures=3)
+
+    assert state.tick(1.0) == []  # 丢掉 t=30 的旧排期，按新间隔改排到 t=6
+    assert state.tick(6.0) == [ProxyOk("10.0.0.1:7890", 12.0)]
+
+
+def test_update_applies_the_new_failure_threshold():
+    state = build(probe=fail_probe, monitor_interval_s=1, proxy_check_failures=3,
+                  network_poll_interval_s=1e9)
+    state.set_proxy("10.0.0.1:7890")
+    state.tick(0.0)
+
+    state.update(monitor_interval_s=1, scan_timeout_ms=500, proxy_check_failures=1)
+    state.tick(2.0)  # 重新排期
+
+    assert state.tick(3.0) == [ProxyLost("10.0.0.1:7890", 1)]
+
+
+def test_update_keeps_the_current_proxy_and_failure_count():
+    """改配置不是换代理，已累计的失败次数不该像 set_proxy 那样被清零。"""
+    state = build(probe=fail_probe, monitor_interval_s=1, proxy_check_failures=3,
+                  network_poll_interval_s=1e9)
+    state.set_proxy("10.0.0.1:7890")
+    state.tick(0.0)
+    assert state.tick(2.0) == []  # 第 1 次失败，未达阈值
+
+    state.update(monitor_interval_s=1, scan_timeout_ms=500, proxy_check_failures=2)
+    state.tick(4.0)  # 重新排期
+
+    assert state.tick(5.0) == [ProxyLost("10.0.0.1:7890", 2)]

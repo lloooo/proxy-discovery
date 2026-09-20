@@ -65,6 +65,23 @@ class MonitorState:
         self._server: str | None = None
         self._failures = 0
 
+    def update(
+        self,
+        *,
+        monitor_interval_s: int,
+        scan_timeout_ms: int,
+        proxy_check_failures: int,
+    ) -> None:
+        """由控制器线程调用的配置热更新。只改几个 int，无需加锁。
+
+        与 set_proxy 不同：代理和已累计的失败次数保持不变，只把下一次探测
+        重新排期，好让缩短后的间隔立刻起效。
+        """
+        self._monitor_interval_s = monitor_interval_s
+        self._scan_timeout_ms = scan_timeout_ms
+        self._proxy_check_failures = proxy_check_failures
+        self._next_proxy_check = None
+
     def set_proxy(self, server: str | None) -> None:
         self._server = server
         self._failures = 0

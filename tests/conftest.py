@@ -129,9 +129,13 @@ class FakeProxy:
 class FakeMonitor:
     def __init__(self):
         self.servers = []
+        self.updates = []
 
     def set_proxy(self, server):
         self.servers.append(server)
+
+    def update(self, *, monitor_interval_s, scan_timeout_ms, proxy_check_failures):
+        self.updates.append((monitor_interval_s, scan_timeout_ms, proxy_check_failures))
 
 
 @pytest.fixture(scope="session")
